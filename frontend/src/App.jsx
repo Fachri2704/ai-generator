@@ -56,76 +56,138 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="mx-auto max-w-6xl grid gap-6 lg:grid-cols-2">
-        <div className="bg-white rounded-xl shadow p-5">
-          <h1 className="text-xl font-semibold">AI Landing Page Generator</h1>
-          <p className="text-sm text-gray-600 mt-1">
-            Isi data → Generate → dapat HTML + preview
-          </p>
-
-          <div className="mt-4 grid gap-3">
-            <Input label="Nama PT" name="company_name" value={form.company_name} onChange={onChange} />
-            <Input label="Produk/Jasa" name="product" value={form.product} onChange={onChange} />
-            <Input label="Target Audiens" name="audience" value={form.audience} onChange={onChange} />
-
-            <div>
-              <label className="text-sm font-medium">Tone</label>
-              <select name="tone" value={form.tone} onChange={onChange}
-                className="mt-1 w-full rounded-lg border p-2">
-                <option value="profesional">Profesional</option>
-                <option value="formal">Formal</option>
-                <option value="santai">Santai</option>
-              </select>
-            </div>
-
-            <Input label="CTA Button" name="cta" value={form.cta} onChange={onChange} />
-            <Input label="Contact (opsional)" name="contact" value={form.contact} onChange={onChange} />
-            <Input label="Warna Brand (opsional)" name="brand_color" value={form.brand_color} onChange={onChange} />
-
-            <button
-              onClick={generate}
-              disabled={loading}
-              className="mt-2 rounded-lg bg-black text-white py-2 disabled:opacity-60"
-            >
-              {loading ? "Generating..." : "Generate Landing Page"}
+    <div className="pageWrap">
+        <div className="navBar">
+          <div className="navTitle">AI to Landing Page Generator</div>
+          <div className="navLinks">
+            <button className="navLink" type="button">
+              Login
             </button>
-
-            {err && <div className="text-sm text-red-600">{err}</div>}
+            <span className="navDivider">|</span>
+            <button className="navLink" type="button">
+              Register
+            </button>
           </div>
         </div>
 
-        <div className="bg-white rounded-xl shadow p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Output</h2>
-            <button
-              className="text-sm underline disabled:opacity-50"
-              disabled={!html}
-              onClick={() => navigator.clipboard.writeText(html)}
-            >
-              Copy HTML123
-            </button>
-          </div>
+        <p className="tagline">
+          Generate clean, ready to use landing pages in seconds
+        </p>
 
-          <div className="mt-3 grid gap-4">
-            <textarea
-              className="w-full h-56 rounded-lg border p-2 font-mono text-xs"
-              value={html}
-              readOnly
-              placeholder="HTML akan muncul di sini..."
-            />
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <section className="lg:col-span-5">
+            <div className="card cardSoft">
+              <div className="grid gap-3">
+                <Input
+                  label="Company Name"
+                  name="company_name"
+                  value={form.company_name}
+                  onChange={onChange}
+                  placeholder="Company Name"
+                />
+                <Input
+                  label="Product / Services"
+                  name="product"
+                  value={form.product}
+                  onChange={onChange}
+                  placeholder="Example: AI-powered landing page generator"
+                />
+                <Input
+                  label="Audience Target"
+                  name="audience"
+                  value={form.audience}
+                  onChange={onChange}
+                  placeholder="Example: Parents, Adults"
+                />
 
-            <div className="rounded-lg border overflow-hidden">
-              <div className="px-3 py-2 text-sm bg-gray-100 border-b">Preview</div>
-              <iframe
-                title="preview"
-                className="w-full h-80"
-                srcDoc={html}
-              />
+                <div>
+                  <label className="text-[12px] md:text-[13px] font-medium text-[#111111]">
+                    Tone
+                  </label>
+                  <select
+                    name="tone"
+                    value={form.tone}
+                    onChange={onChange}
+                  className="input"
+                  >
+                    <option value="profesional">Professional</option>
+                    <option value="formal">Formal</option>
+                    <option value="santai">Casual</option>
+                  </select>
+                </div>
+
+                <Input
+                  label="CTA Button"
+                  name="cta"
+                  value={form.cta}
+                  onChange={onChange}
+                  placeholder="Example: Contact Us, Buy Now"
+                />
+                <Input
+                  label="Contact (optional)"
+                  name="contact"
+                  value={form.contact}
+                  onChange={onChange}
+                  placeholder=""
+                />
+                <Input
+                  label="Color Brand (optional)"
+                  name="brand_color"
+                  value={form.brand_color}
+                  onChange={onChange}
+                  placeholder=""
+                />
+
+                <button
+                  onClick={generate}
+                  disabled={loading}
+                  className="btnPrimary mt-1"
+                >
+                  {loading ? "Generating..." : "Generate Landing Page"}
+                </button>
+
+                {err && <div className="text-[12px] md:text-[13px] text-red-600">{err}</div>}
+              </div>
             </div>
-          </div>
+          </section>
+
+          <section className="lg:col-span-7 flex flex-col gap-6">
+            <div className="card">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[14px] md:text-[16px] font-semibold text-[#111111]">Output</h2>
+                <button
+                  className="btnSmall"
+                  disabled={!html}
+                  onClick={() => navigator.clipboard.writeText(html)}
+                >
+                  Copy HTML
+                </button>
+              </div>
+
+              <div className="mt-3 grid gap-3">
+                <textarea
+                  className="codeBox"
+                  value={html}
+                  readOnly
+                  placeholder="Your generated HTML code will appear here"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <div className="text-[13px] md:text-[14px] font-semibold text-[#111111]">
+                Preview
+              </div>
+              <div className="previewCard">
+                <iframe
+                  title="preview"
+                  className="h-full w-full"
+                  srcDoc={html}
+                />
+              </div>
+            </div>
+          </section>
         </div>
-      </div>
     </div>
   );
 }
@@ -133,8 +195,8 @@ export default function App() {
 function Input({ label, ...props }) {
   return (
     <div>
-      <label className="text-sm font-medium">{label}</label>
-      <input {...props} className="mt-1 w-full rounded-lg border p-2" />
+      <label className="text-[12px] md:text-[13px] font-medium text-[#111111]">{label}</label>
+      <input {...props} className="input" />
     </div>
   );
 }

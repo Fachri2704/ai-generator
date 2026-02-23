@@ -25,19 +25,31 @@ body {
 
 @layer components {
   .pageWrap {
-    @apply min-h-screen bg-[#efefef] px-6 py-6 md:px-10 md:py-8;
+    @apply min-h-screen bg-[#efefef];
+  }
+
+  .siteHeader {
+    @apply sticky top-0 z-30 border-b border-[#c9c9c9] bg-[#e7e7e7]/95 backdrop-blur;
+  }
+
+  .siteHeaderInner {
+    @apply mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-4 py-4 md:px-6;
+  }
+
+  .mainWrap {
+    @apply mx-auto w-full max-w-6xl px-4 py-6 md:px-6 md:py-8;
   }
 
   .shell {
-    @apply mx-auto w-full max-w-6xl rounded-[14px] bg-[#e7e7e7] px-4 py-4 md:px-6 md:py-5 shadow-[0_12px_30px_rgba(0,0,0,0.12)];
+    @apply rounded-[18px] border border-[#c9c9c9] bg-[#e7e7e7] px-4 py-4 md:px-6 md:py-6 shadow-[0_12px_30px_rgba(0,0,0,0.08)];
   }
 
   .navBar {
-    @apply flex items-center justify-between gap-4 border-b border-[#c9c9c9] pb-3;
+    @apply flex items-center justify-between gap-4;
   }
 
   .navTitle {
-    @apply text-[15px] md:text-[18px] font-semibold text-[#111111];
+    @apply text-[16px] md:text-[20px] font-semibold text-[#111111];
   }
 
   .navLinks {
@@ -53,7 +65,7 @@ body {
   }
 
   .tagline {
-    @apply mt-3 text-[12px] md:text-[14px] text-[#111111];
+    @apply mt-3 text-[12px] md:text-[14px] text-[#3e3e3e];
   }
 
   .headerRow {
@@ -108,6 +120,26 @@ body {
 
   .previewCardCompact {
     height: 200px;
+  }
+
+  .authLayout {
+    @apply mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12;
+  }
+
+  .authInfo {
+    @apply rounded-[16px] border border-[#bfbfbf] bg-white px-5 py-6 lg:col-span-5;
+  }
+
+  .authInfoTitle {
+    @apply text-[24px] md:text-[30px] font-semibold leading-tight text-[#111111];
+  }
+
+  .authInfoText {
+    @apply mt-3 text-[13px] md:text-[14px] text-[#454545];
+  }
+
+  .authFormWrap {
+    @apply lg:col-span-7;
   }
 }
 

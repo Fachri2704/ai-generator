@@ -24,7 +24,7 @@ const readErrorMessage = (data) => {
 };
 
 export default function App() {
-  const [view, setView] = useState("generator");
+  const [view, setView] = useState(() => (getStoredUser() ? "generator" : "login"));
   const [user, setUser] = useState(getStoredUser);
 
   const [form, setForm] = useState({
@@ -192,7 +192,7 @@ export default function App() {
           <button
             className="navTitle border-0 bg-transparent p-0 text-left"
             type="button"
-            onClick={() => setView("generator")}
+            onClick={() => setView(user ? "generator" : "login")}
           >
             AI to Landing Page Generator
           </button>
@@ -247,7 +247,7 @@ export default function App() {
             />
           ) : null}
 
-          {view === "generator" ? (
+          {view === "generator" && user ? (
             <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
               <section className="lg:col-span-5">
                 <div className="card cardSoft">

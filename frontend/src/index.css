@@ -141,6 +141,48 @@ body {
   .authFormWrap {
     @apply lg:col-span-7;
   }
+
+  .loadingOverlay {
+    @apply fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4;
+  }
+
+  .loadingPopup {
+    @apply w-full max-w-sm rounded-[16px] border border-[#d5d5d5] bg-white px-5 py-5 text-center shadow-[0_20px_45px_rgba(0,0,0,0.24)];
+  }
+
+  .loadingSpinner {
+    display: inline-block;
+    width: 36px;
+    height: 36px;
+    border: 3px solid #d8d8d8;
+    border-top-color: #111111;
+    border-radius: 9999px;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .loadingTitle {
+    @apply mt-3 text-[14px] md:text-[15px] font-semibold text-[#111111];
+  }
+
+  .loadingText {
+    @apply mt-1 text-[12px] md:text-[13px] text-[#4b4b4b];
+  }
+
+  .alertOverlay {
+    @apply fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4;
+  }
+
+  .alertPopup {
+    @apply w-full max-w-sm rounded-[16px] border border-[#d5d5d5] bg-white px-5 py-5 text-center shadow-[0_20px_45px_rgba(0,0,0,0.24)];
+  }
+
+  .alertTitle {
+    @apply text-[16px] md:text-[18px] font-semibold text-[#111111];
+  }
+
+  .alertText {
+    @apply mt-2 text-[13px] md:text-[14px] text-[#444444];
+  }
 }
 
 @media (max-width: 767px) {
@@ -158,5 +200,15 @@ body {
 
   .previewCard {
     height: 240px;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
   }
 }

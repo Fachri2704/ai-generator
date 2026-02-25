@@ -23,6 +23,25 @@ const readErrorMessage = (data) => {
   return "Terjadi kesalahan.";
 };
 
+const isQuotaLimitError = (message) => {
+  const text = String(message || "").toLowerCase();
+  return (
+    text.includes("quota exceeded") ||
+    text.includes("rate limit") ||
+    text.includes("exceeded your current quota") ||
+    text.includes("too many requests") ||
+    text.includes("retry in")
+  );
+};
+
+const parseRetrySeconds = (message) => {
+  const text = String(message || "");
+  const match = text.match(/retry in\s+([\d.]+)s/i);
+  if (!match?.[1]) return null;
+  const sec = Math.ceil(Number(match[1]));
+  return Number.isFinite(sec) ? sec : null;
+};
+
 export default function App() {
   const [view, setView] = useState(() => (getStoredUser() ? "generator" : "login"));
   const [user, setUser] = useState(getStoredUser);
@@ -32,7 +51,11 @@ export default function App() {
     product: "",
     audience: "",
     tone: "profesional",
-    cta: "Hubungi Kami",
+    main_offer: "",
+    price_note: "",
+    bonus: "",
+    urgency: "",
+    cta: "Daftar Sekarang",
     contact: "",
     brand_color: "",
   });
@@ -55,6 +78,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authErr, setAuthErr] = useState("");
   const [authMsg, setAuthMsg] = useState("");
+  const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
 
   const onChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
   const onLoginChange = (e) => setLoginForm({ ...loginForm, [e.target.name]: e.target.value });
@@ -150,6 +174,7 @@ export default function App() {
   const generate = async () => {
     setLoading(true);
     setErr("");
+    setLimitPopup({ open: false, retryIn: null });
     setHtml("");
 
     try {
@@ -179,7 +204,16 @@ export default function App() {
 
       setHtml(data.html);
     } catch (e) {
-      setErr(String(e.message || e));
+      const message = String(e.message || e);
+      if (isQuotaLimitError(message)) {
+        setErr("");
+        setLimitPopup({
+          open: true,
+          retryIn: parseRetrySeconds(message),
+        });
+      } else {
+        setErr(message);
+      }
     } finally {
       setLoading(false);
     }
@@ -253,25 +287,53 @@ export default function App() {
                 <div className="card cardSoft">
                   <div className="grid gap-3">
                     <Input
-                      label="Company Name"
+                      label="Nama Brand / Bisnis"
                       name="company_name"
                       value={form.company_name}
                       onChange={onChange}
-                      placeholder="Company Name"
+                      placeholder="Contoh: Tahfidz Scalev Academy"
                     />
                     <Input
-                      label="Product / Services"
+                      label="Produk / Program"
                       name="product"
                       value={form.product}
                       onChange={onChange}
-                      placeholder="Example: AI-powered landing page generator"
+                      placeholder="Contoh: Kelas Tahfidz Online 90 Hari"
                     />
                     <Input
-                      label="Audience Target"
+                      label="Target Audiens"
                       name="audience"
                       value={form.audience}
                       onChange={onChange}
-                      placeholder="Example: Parents, Adults"
+                      placeholder="Contoh: Orang tua muslim usia 25-45 tahun"
+                    />
+                    <Input
+                      label="Headline Penawaran Utama"
+                      name="main_offer"
+                      value={form.main_offer}
+                      onChange={onChange}
+                      placeholder="Contoh: Hafal 2 Juz dalam 90 Hari dengan Metode Terarah"
+                    />
+                    <Input
+                      label="Harga / Promo Singkat"
+                      name="price_note"
+                      value={form.price_note}
+                      onChange={onChange}
+                      placeholder="Contoh: Mulai 299rb, diskon 40% hingga Jumat"
+                    />
+                    <Input
+                      label="Bonus Produk (Opsional)"
+                      name="bonus"
+                      value={form.bonus}
+                      onChange={onChange}
+                      placeholder="Contoh: E-book murojaah + mentoring mingguan"
+                    />
+                    <Input
+                      label="Elemen Urgency (Opsional)"
+                      name="urgency"
+                      value={form.urgency}
+                      onChange={onChange}
+                      placeholder="Contoh: Kuota batch ini tinggal 17 kursi"
                     />
 
                     <div>
@@ -286,25 +348,25 @@ export default function App() {
                     </div>
 
                     <Input
-                      label="CTA Button"
+                      label="CTA Utama"
                       name="cta"
                       value={form.cta}
                       onChange={onChange}
-                      placeholder="Example: Contact Us, Buy Now"
+                      placeholder="Contoh: Ambil Promo Sekarang"
                     />
                     <Input
-                      label="Contact (optional)"
+                      label="Kontak (Opsional)"
                       name="contact"
                       value={form.contact}
                       onChange={onChange}
-                      placeholder=""
+                      placeholder="Contoh: WhatsApp 08xxxxxxxxxx"
                     />
                     <Input
-                      label="Color Brand (optional)"
+                      label="Warna Brand (Opsional)"
                       name="brand_color"
                       value={form.brand_color}
                       onChange={onChange}
-                      placeholder=""
+                      placeholder="Contoh: #0A7A4B"
                     />
 
                     <button onClick={generate} disabled={loading} className="btnPrimary mt-1">
@@ -350,6 +412,31 @@ export default function App() {
           ) : null}
         </div>
       </main>
+
+      {loading ? (
+        <div className="loadingOverlay" role="status" aria-live="polite" aria-label="Sedang generate landing page">
+          <div className="loadingPopup">
+            <span className="loadingSpinner" aria-hidden="true" />
+            <div className="loadingTitle">Sedang Generate Landing Page</div>
+            <div className="loadingText">AI lagi nyusun struktur, copywriting, dan HTML kamu...</div>
+          </div>
+        </div>
+      ) : null}
+
+      {limitPopup.open ? (
+        <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Batas penggunaan API">
+          <div className="alertPopup">
+            <div className="alertTitle">Batas API Tercapai</div>
+            <div className="alertText">
+              Kuota request AI kamu lagi habis sementara.
+              {limitPopup.retryIn ? ` Coba lagi sekitar ${limitPopup.retryIn} detik.` : " Coba lagi beberapa saat."}
+            </div>
+            <button type="button" className="btnSmall mt-4" onClick={() => setLimitPopup({ open: false, retryIn: null })}>
+              Oke, Mengerti
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

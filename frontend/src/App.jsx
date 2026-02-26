@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
+import AiToCompro from "./pages/AiToCompro";
 
 const USER_STORAGE_KEY = "ai-landing-auth-user";
 
@@ -45,6 +46,7 @@ const parseRetrySeconds = (message) => {
 export default function App() {
   const [view, setView] = useState(() => (getStoredUser() ? "generator" : "login"));
   const [user, setUser] = useState(getStoredUser);
+  const [generatorMode, setGeneratorMode] = useState("landing");
 
   const [form, setForm] = useState({
     company_name: "",
@@ -74,11 +76,11 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
   const [html, setHtml] = useState("");
-  const [err, setErr] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [authErr, setAuthErr] = useState("");
   const [authMsg, setAuthMsg] = useState("");
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
+  const [errorPopup, setErrorPopup] = useState({ open: false, message: "" });
   const [previewHeight, setPreviewHeight] = useState(520);
   const formCardRef = useRef(null);
 
@@ -101,6 +103,7 @@ export default function App() {
       localStorage.removeItem(USER_STORAGE_KEY);
       setUser(null);
       setView("login");
+      setGeneratorMode("landing");
       setAuthMsg("Kamu sudah logout.");
     }
   };
@@ -175,8 +178,8 @@ export default function App() {
 
   const generate = async () => {
     setLoading(true);
-    setErr("");
     setLimitPopup({ open: false, retryIn: null });
+    setErrorPopup({ open: false, message: "" });
     setHtml("");
 
     try {
@@ -208,13 +211,12 @@ export default function App() {
     } catch (e) {
       const message = String(e.message || e);
       if (isQuotaLimitError(message)) {
-        setErr("");
         setLimitPopup({
           open: true,
           retryIn: parseRetrySeconds(message),
         });
       } else {
-        setErr(message);
+        setErrorPopup({ open: true, message });
       }
     } finally {
       setLoading(false);
@@ -261,7 +263,7 @@ export default function App() {
             type="button"
             onClick={() => setView(user ? "generator" : "login")}
           >
-            AI to Landing Page Generator
+            AI Website Generator
           </button>
           <div className="navLinks">
             {user ? (
@@ -290,7 +292,28 @@ export default function App() {
       <main className="mainWrap">
         <div className="shell">
           <div className="navBar">
-            <p className="tagline">Generate clean, ready to use landing pages in seconds</p>
+            {view === "generator" && user ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btnSmall"
+                  onClick={() => setGeneratorMode("landing")}
+                  disabled={generatorMode === "landing"}
+                >
+                  AiToLanding
+                </button>
+                <button
+                  type="button"
+                  className="btnSmall"
+                  onClick={() => setGeneratorMode("company")}
+                  disabled={generatorMode === "company"}
+                >
+                  AiToCompro
+                </button>
+              </div>
+            ) : (
+              <p className="tagline">Generate clean, ready to use landing pages in seconds</p>
+            )}
           </div>
 
           {authMsg && <div className="mt-3 text-[12px] md:text-[13px] text-green-700">{authMsg}</div>}
@@ -314,7 +337,7 @@ export default function App() {
             />
           ) : null}
 
-          {view === "generator" && user ? (
+          {view === "generator" && user && generatorMode === "landing" ? (
             <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
               <section className="lg:col-span-5">
                 <div ref={formCardRef} className="card cardSoft">
@@ -406,7 +429,6 @@ export default function App() {
                       {loading ? "Generating..." : "Generate Landing Page"}
                     </button>
 
-                    {err && <div className="text-[12px] md:text-[13px] text-red-600">{err}</div>}
                   </div>
                 </div>
               </section>
@@ -443,10 +465,12 @@ export default function App() {
               </section>
             </div>
           ) : null}
+
+          {view === "generator" && user && generatorMode === "company" ? <AiToCompro /> : null}
         </div>
       </main>
 
-      {loading ? (
+      {loading && generatorMode === "landing" ? (
         <div className="loadingOverlay" role="status" aria-live="polite" aria-label="Sedang generate landing page">
           <div className="loadingPopup">
             <span className="loadingSpinner" aria-hidden="true" />
@@ -456,7 +480,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {limitPopup.open ? (
+      {limitPopup.open && generatorMode === "landing" ? (
         <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Batas penggunaan API">
           <div className="alertPopup">
             <div className="alertTitle">Batas API Tercapai</div>
@@ -466,6 +490,22 @@ export default function App() {
             </div>
             <button type="button" className="btnSmall mt-4" onClick={() => setLimitPopup({ open: false, retryIn: null })}>
               Oke, Mengerti
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {errorPopup.open && generatorMode === "landing" ? (
+        <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Generate gagal">
+          <div className="alertPopup">
+            <div className="alertTitle">Generate Gagal</div>
+            <div className="alertText">{errorPopup.message}</div>
+            <button
+              type="button"
+              className="btnSmall mt-4"
+              onClick={() => setErrorPopup({ open: false, message: "" })}
+            >
+              Tutup
             </button>
           </div>
         </div>

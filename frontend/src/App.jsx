@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 
@@ -79,6 +79,8 @@ export default function App() {
   const [authErr, setAuthErr] = useState("");
   const [authMsg, setAuthMsg] = useState("");
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
+  const [previewHeight, setPreviewHeight] = useState(520);
+  const formCardRef = useRef(null);
 
   const onChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
   const onLoginChange = (e) => setLoginForm({ ...loginForm, [e.target.name]: e.target.value });
@@ -219,6 +221,37 @@ export default function App() {
     }
   };
 
+  const syncPreviewWithForm = () => {
+    if (window.innerWidth < 1024) {
+      setPreviewHeight(360);
+      return;
+    }
+
+    const card = formCardRef.current;
+    if (!card) return;
+    const nextHeight = Math.max(420, Math.floor(card.getBoundingClientRect().height));
+    setPreviewHeight(Math.min(nextHeight, 1500));
+  };
+
+  useEffect(() => {
+    syncPreviewWithForm();
+
+    if (!formCardRef.current || typeof ResizeObserver === "undefined") {
+      const onResize = () => syncPreviewWithForm();
+      window.addEventListener("resize", onResize);
+      return () => window.removeEventListener("resize", onResize);
+    }
+
+    const observer = new ResizeObserver(() => syncPreviewWithForm());
+    observer.observe(formCardRef.current);
+    window.addEventListener("resize", syncPreviewWithForm);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", syncPreviewWithForm);
+    };
+  }, [view, user, form]);
+
   return (
     <div className="pageWrap">
       <header className="siteHeader">
@@ -284,7 +317,7 @@ export default function App() {
           {view === "generator" && user ? (
             <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
               <section className="lg:col-span-5">
-                <div className="card cardSoft">
+                <div ref={formCardRef} className="card cardSoft">
                   <div className="grid gap-3">
                     <Input
                       label="Nama Brand / Bisnis"
@@ -403,7 +436,7 @@ export default function App() {
 
                 <div className="grid gap-2">
                   <div className="text-[13px] md:text-[14px] font-semibold text-[#111111]">Preview</div>
-                  <div className="previewCard">
+                  <div className="previewCard" style={{ height: `${previewHeight}px` }}>
                     <iframe title="preview" className="h-full w-full" srcDoc={html} />
                   </div>
                 </div>

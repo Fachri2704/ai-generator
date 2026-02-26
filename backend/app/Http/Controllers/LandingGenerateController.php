@@ -186,11 +186,11 @@ ATURAN OUTPUT:
   - Form field harus tersusun vertikal rapi, label di atas input, jarak antar field konsisten.
   - Card/testimoni/faq harus punya padding, border/radius, dan background yang konsisten.
   - Gunakan layout grid/flex yang aman agar tidak overflow horizontal.
-- Aturan gambar WAJIB anti broken image:
-  - Jangan pakai URL gambar acak yang rawan 404.
-  - Gunakan ilustrasi inline SVG di dalam HTML (preferred) ATAU data URI SVG.
-  - Jika tetap pakai <img>, wajib tambahkan fallback `onerror` yang mengganti ke data URI SVG agar tidak ada ikon gambar rusak.
-  - Semua gambar wajib punya ukuran jelas (`width/height` atau container aspect-ratio), `object-fit: cover`, dan `display:block`.
+- Aturan visual media:
+  - Untuk section fitur/benefit/card seperti referensi, JANGAN gunakan `<img>`.
+  - Gunakan icon saja (inline SVG atau karakter icon/emoji) di dalam elemen `.icon-badge` agar pasti tampil.
+  - Icon harus konsisten ukuran (mis. 28px-40px), center, dan punya background badge yang rapi.
+  - Jika perlu hero visual, tetap prioritaskan ilustrasi CSS/SVG inline, bukan gambar link eksternal.
 - Aturan FAQ WAJIB stabil:
   - Gunakan struktur semantik `<details class="faq-item"><summary>...</summary><div class="faq-answer">...</div></details>`.
   - `summary` wajib full-width, rapi, tanpa border aneh, cursor pointer, ikon +/- konsisten.
@@ -222,7 +222,7 @@ ATURAN OUTPUT:
   1) Tidak ada elemen input/button/textarea yang tampil default browser.
   2) Semua CTA button terlihat center secara visual.
   3) Kontras warna tombol aman di semua state (normal/hover/focus) dan tetap terbaca.
-  4) Semua gambar tampil normal tanpa broken image/not found.
+  4) Untuk fitur/benefit, hanya gunakan icon (tanpa `<img>`), dan icon tampil normal.
   5) FAQ berfungsi dan tampil rapi (tertutup/terbuka) di mobile + desktop.
   6) Tidak ada teks keluar container atau terpotong di mobile.
   7) Struktur section lengkap dan jarak antar section konsisten.

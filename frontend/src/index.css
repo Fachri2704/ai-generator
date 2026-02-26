@@ -115,7 +115,7 @@ body {
 
   .previewCard {
     @apply w-full rounded-[16px] border border-[#cfcfcf] bg-white overflow-hidden;
-    height: 320px;
+    min-height: 320px;
   }
 
   .previewCardCompact {
@@ -199,7 +199,7 @@ body {
   }
 
   .previewCard {
-    height: 240px;
+    min-height: 240px;
   }
 }
 

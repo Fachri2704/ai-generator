@@ -300,7 +300,7 @@ export default function App() {
                   onClick={() => setGeneratorMode("landing")}
                   disabled={generatorMode === "landing"}
                 >
-                  AiToLanding
+                  AiToLandingPage
                 </button>
                 <button
                   type="button"

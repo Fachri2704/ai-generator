@@ -36,9 +36,11 @@ return [
     ],
 
     'gemini' => [
-  'key' => env('GEMINI_API_KEY'),
-  'model' => env('GEMINI_MODEL', 'gemini-2.0-flash'),
-],
+        'key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-2.0-flash'),
+        // Optional fallback model; keep empty to disable forced fallback.
+        'fallback_model' => env('GEMINI_FALLBACK_MODEL', ''),
+    ],
 
 
 ];

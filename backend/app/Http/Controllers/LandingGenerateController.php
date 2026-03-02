@@ -6,14 +6,14 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LandingGenerateController extends Controller
 {
     public function generate(Request $request)
     {
-        // Hindari timeout default 60 detik saat generate konten panjang.
-        @set_time_limit(300);
+        $this->applyExecutionLimits();
 
         $data = $request->validate([
             'company_name' => 'required|string|max:100',
@@ -31,6 +31,7 @@ class LandingGenerateController extends Controller
 
         $apiKey = (string) config('services.gemini.key');
         $model  = (string) config('services.gemini.model', 'gemini-2.0-flash');
+        $fallbackModel = (string) config('services.gemini.fallback_model', '');
 
         if (trim($apiKey) === '') {
             throw ValidationException::withMessages([
@@ -41,10 +42,14 @@ class LandingGenerateController extends Controller
         $prompt = $this->buildPrompt($data);
 
         try {
-            $html = $this->callGeminiHtml($prompt, $apiKey, $model);
+            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
         } catch (ValidationException $e) {
             throw $e;
         } catch (\Throwable $e) {
+            Log::error('Generate landing failed', [
+                'error' => $e->getMessage(),
+                'class' => get_class($e),
+            ]);
             throw ValidationException::withMessages([
                 'ai' => ['Koneksi ke layanan AI terputus. Coba lagi sebentar.'],
             ]);
@@ -57,7 +62,7 @@ class LandingGenerateController extends Controller
 
     public function generateCompanyProfile(Request $request)
     {
-        @set_time_limit(300);
+        $this->applyExecutionLimits();
 
         $data = $request->validate([
             'company_name'       => 'required|string|max:120',
@@ -83,6 +88,7 @@ class LandingGenerateController extends Controller
 
         $apiKey = (string) config('services.gemini.key');
         $model  = (string) config('services.gemini.model', 'gemini-2.0-flash');
+        $fallbackModel = (string) config('services.gemini.fallback_model', '');
 
         if (trim($apiKey) === '') {
             throw ValidationException::withMessages([
@@ -93,10 +99,14 @@ class LandingGenerateController extends Controller
         $prompt = $this->buildCompanyProfilePrompt($data);
 
         try {
-            $html = $this->callGeminiHtml($prompt, $apiKey, $model);
+            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
         } catch (ValidationException $e) {
             throw $e;
         } catch (\Throwable $e) {
+            Log::error('Generate company profile failed', [
+                'error' => $e->getMessage(),
+                'class' => get_class($e),
+            ]);
             throw ValidationException::withMessages([
                 'ai' => ['Koneksi ke layanan AI terputus. Coba lagi sebentar.'],
             ]);
@@ -107,14 +117,388 @@ class LandingGenerateController extends Controller
         ]);
     }
 
+    private function applyExecutionLimits(): void
+    {
+        $seconds = (int) env('GEMINI_MAX_EXECUTION_SECONDS', 240);
+        $seconds = max(60, min($seconds, 600));
+        @ini_set('max_execution_time', (string) $seconds);
+        @set_time_limit($seconds);
+    }
+
+    private function buildCompanyProfileFallbackHtml(array $d): string
+    {
+        $theme = $this->pickFallbackTheme();
+        $company = $this->e($d['company_name'] ?? 'Perusahaan Anda');
+        $industry = $this->e($d['industry'] ?? 'Industri');
+        $tagline = $this->e($d['tagline'] ?? 'Mitra tepercaya untuk pertumbuhan bisnis Anda.');
+        $overview = $this->e($d['company_overview'] ?? 'Kami membantu bisnis berkembang dengan solusi yang terukur.');
+        $vision = $this->e($d['vision'] ?? 'Menjadi perusahaan terpercaya di bidang layanan kami.');
+        $mission = $this->listFromText($d['mission'] ?? '');
+        $services = $this->listFromText($d['services'] ?? '');
+        $target = $this->e($d['target_market'] ?? 'Perusahaan, UMKM, dan organisasi yang ingin bertumbuh lebih cepat.');
+        $uvp = $this->e($d['unique_value'] ?? 'Pendekatan strategis, eksekusi cepat, dan komunikasi yang transparan.');
+        $achievements = $this->listFromText($d['achievements'] ?? '');
+        $portfolio = $this->listFromText($d['portfolio'] ?? '');
+        $team = $this->e($d['team_info'] ?? 'Tim berpengalaman lintas disiplin untuk memastikan hasil yang konsisten.');
+        $email = $this->e($d['contact_email'] ?? '-');
+        $phone = $this->e($d['contact_phone'] ?? '-');
+        $address = $this->e($d['address'] ?? '-');
+        $social = $this->e($d['social_links'] ?? '-');
+        $cta = $this->e($d['cta'] ?? 'Hubungi Kami');
+        $brandColor = $this->normalizeColor($d['brand_color'] ?? $theme['primary']);
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$company} - Company Profile</title>
+  <style>
+    :root {
+      --primary: {$brandColor};
+      --text: {$theme['text']};
+      --muted: {$theme['muted']};
+      --bg: {$theme['bg']};
+      --surface: {$theme['surface']};
+      --border: {$theme['border']};
+      --footer-bg: {$theme['footerBg']};
+      --footer-text: {$theme['footerText']};
+      --footer-border: {$theme['footerBorder']};
+      --footer-link: {$theme['footerLink']};
+      --hero-grad-a: {$theme['heroA']};
+      --hero-grad-b: {$theme['heroB']};
+    }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body {
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      color:var(--text);
+      background:radial-gradient(circle at top right, rgba(255,255,255,.45), transparent 36%), var(--bg);
+      line-height:1.6;
+    }
+    .container { width:min(1080px, 92vw); margin:0 auto; }
+    .header { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid var(--border); }
+    .header-inner { display:flex; justify-content:space-between; align-items:center; padding:14px 0; gap:16px; }
+    .brand { font-weight:700; color:var(--primary); text-decoration:none; font-size:1.1rem; }
+    .nav { display:flex; gap:18px; }
+    .nav a { color:var(--text); text-decoration:none; font-weight:600; font-size:.95rem; }
+    .hero { padding:56px 0 30px; }
+    .hero-card {
+      background:linear-gradient(135deg, var(--hero-grad-a), var(--hero-grad-b));
+      border:1px solid var(--border);
+      border-radius:20px;
+      padding:28px;
+      box-shadow:0 12px 30px rgba(0,0,0,.08);
+    }
+    h1,h2,h3 { margin:0 0 10px; line-height:1.3; }
+    h1 { font-size:clamp(1.6rem, 4vw, 2.4rem); }
+    h2 { font-size:clamp(1.3rem, 3vw, 1.8rem); margin-top:14px; }
+    p { margin:0 0 10px; color:var(--muted); }
+    .btn {
+      display:inline-block;
+      margin-top:12px;
+      background:var(--primary);
+      color:#fff;
+      text-decoration:none;
+      border-radius:12px;
+      padding:10px 16px;
+      font-weight:700;
+      box-shadow:0 8px 20px rgba(0,0,0,.12);
+    }
+    .grid { display:grid; gap:16px; grid-template-columns:repeat(12, 1fr); margin:22px 0; }
+    .card {
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:18px;
+      box-shadow:0 8px 22px rgba(0,0,0,.06);
+    }
+    .col-6 { grid-column:span 6; } .col-12 { grid-column:span 12; } .col-4 { grid-column:span 4; }
+    ul { margin:0; padding-left:18px; color:var(--muted); }
+    li { margin:6px 0; }
+    .footer { background:var(--footer-bg); color:var(--footer-text); margin-top:28px; }
+    .footer a { color:var(--footer-link); text-decoration:none; }
+    .footer-top { display:grid; grid-template-columns:2fr 1fr 1fr; gap:20px; padding:28px 0 18px; }
+    .footer h3 { color:#fff; font-size:1.05rem; margin-bottom:8px; }
+    .social { display:flex; gap:10px; flex-wrap:wrap; }
+    .social span {
+      display:inline-flex;
+      width:34px;
+      height:34px;
+      align-items:center;
+      justify-content:center;
+      border:1px solid var(--footer-border);
+      border-radius:999px;
+      font-size:12px;
+    }
+    .footer-bottom { border-top:1px solid var(--footer-border); padding:14px 0 22px; font-size:.9rem; color:var(--footer-text); }
+    @media (max-width: 900px) {
+      .col-6, .col-4 { grid-column:span 12; }
+      .footer-top { grid-template-columns:1fr; }
+      .nav { gap:12px; }
+    }
+  </style>
+</head>
+<body>
+  <header id="home" class="header">
+    <div class="container header-inner">
+      <a class="brand" href="#home">{$company}</a>
+      <nav class="nav" aria-label="Navigasi utama">
+        <a href="#tentang">Tentang</a>
+        <a href="#layanan">Layanan</a>
+        <a href="#kontak">Kontak</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <div class="hero-card">
+        <h1>{$company}</h1>
+        <p><strong>{$industry}</strong></p>
+        <p>{$tagline}</p>
+        <a class="btn" href="#kontak">{$cta}</a>
+      </div>
+    </section>
+
+    <section id="tentang" class="grid">
+      <div class="card col-6">
+        <h2>Tentang Kami</h2>
+        <p>{$overview}</p>
+      </div>
+      <div class="card col-6">
+        <h2>Visi</h2>
+        <p>{$vision}</p>
+        <h2>Misi</h2>
+        <ul>{$mission}</ul>
+      </div>
+      <div class="card col-6">
+        <h2>Target Market</h2>
+        <p>{$target}</p>
+      </div>
+      <div class="card col-6">
+        <h2>Keunggulan Kami</h2>
+        <p>{$uvp}</p>
+      </div>
+    </section>
+
+    <section id="layanan" class="grid">
+      <div class="card col-12">
+        <h2>Layanan Utama</h2>
+        <ul>{$services}</ul>
+      </div>
+      <div class="card col-6">
+        <h2>Pencapaian</h2>
+        <ul>{$achievements}</ul>
+      </div>
+      <div class="card col-6">
+        <h2>Portfolio</h2>
+        <ul>{$portfolio}</ul>
+      </div>
+      <div class="card col-12">
+        <h2>Tim</h2>
+        <p>{$team}</p>
+      </div>
+    </section>
+  </main>
+
+  <footer id="kontak" class="footer">
+    <div class="container footer-top">
+      <div>
+        <h3>{$company}</h3>
+        <p>Partner tepercaya untuk kebutuhan {$industry} dengan eksekusi yang terukur.</p>
+      </div>
+      <div>
+        <h3>Navigasi</h3>
+        <p><a href="#home">Home</a></p>
+        <p><a href="#tentang">Tentang</a></p>
+        <p><a href="#layanan">Layanan</a></p>
+        <p><a href="#kontak">Kontak</a></p>
+      </div>
+      <div>
+        <h3>Kontak</h3>
+        <p>Email: {$email}</p>
+        <p>Telepon: {$phone}</p>
+        <p>Alamat: {$address}</p>
+        <p>Sosial: {$social}</p>
+        <div class="social"><span>IG</span><span>IN</span><span>YT</span></div>
+      </div>
+    </div>
+    <div class="container footer-bottom">© 2026 {$company}. All rights reserved.</div>
+  </footer>
+</body>
+</html>
+HTML;
+    }
+
+    private function pickFallbackTheme(): array
+    {
+        $themes = [
+            [
+                'primary' => '#1456D9',
+                'text' => '#111827',
+                'muted' => '#4b5563',
+                'bg' => '#f3f4f6',
+                'surface' => '#ffffff',
+                'border' => '#e5e7eb',
+                'footerBg' => '#0b1220',
+                'footerText' => '#94a3b8',
+                'footerBorder' => '#1e293b',
+                'footerLink' => '#e2e8f0',
+                'heroA' => '#ffffff',
+                'heroB' => '#eff6ff',
+            ],
+            [
+                'primary' => '#0f766e',
+                'text' => '#102a2a',
+                'muted' => '#3f5757',
+                'bg' => '#ecfeff',
+                'surface' => '#f8ffff',
+                'border' => '#cbe9e8',
+                'footerBg' => '#022c2b',
+                'footerText' => '#a7f3d0',
+                'footerBorder' => '#134e4a',
+                'footerLink' => '#d1fae5',
+                'heroA' => '#f0fdfa',
+                'heroB' => '#ccfbf1',
+            ],
+            [
+                'primary' => '#a16207',
+                'text' => '#2b2110',
+                'muted' => '#66563a',
+                'bg' => '#fffbeb',
+                'surface' => '#fffef8',
+                'border' => '#f3e4c1',
+                'footerBg' => '#2b2110',
+                'footerText' => '#f5deb3',
+                'footerBorder' => '#7c5a1e',
+                'footerLink' => '#fde68a',
+                'heroA' => '#fffbeb',
+                'heroB' => '#fef3c7',
+            ],
+        ];
+
+        return $themes[array_rand($themes)];
+    }
+
+    private function e(string $text): string
+    {
+        return htmlspecialchars(trim($text), ENT_QUOTES, 'UTF-8');
+    }
+
+    private function normalizeColor(string $color): string
+    {
+        $c = trim($color);
+        if ($c === '' || !preg_match('/^#[0-9a-fA-F]{6}$/', $c)) {
+            return '#1456D9';
+        }
+
+        return $c;
+    }
+
+    private function listFromText(string $text): string
+    {
+        $rows = preg_split('/\r\n|\r|\n|,|;/', (string) $text);
+        $rows = array_values(array_filter(array_map(fn ($r) => trim($r), $rows), fn ($r) => $r !== ''));
+
+        if (count($rows) === 0) {
+            $rows = ['Komitmen kualitas layanan', 'Respon cepat dan terstruktur', 'Fokus pada hasil bisnis klien'];
+        }
+
+        return implode('', array_map(fn ($r) => '<li>' . $this->e($r) . '</li>', array_slice($rows, 0, 6)));
+    }
+
+    private function callGeminiHtmlWithFallback(
+        string $prompt,
+        string $apiKey,
+        string $preferredModel,
+        string $fallbackModel = ''
+    ): string
+    {
+        $models = array_values(array_unique(array_filter([
+            $preferredModel,
+            trim($fallbackModel) !== '' ? trim($fallbackModel) : null,
+        ])));
+
+        $last = null;
+
+        foreach ($models as $idx => $model) {
+            try {
+                if ($idx > 0) {
+                    Log::warning('Gemini fallback model used', [
+                        'from' => $preferredModel,
+                        'to' => $model,
+                    ]);
+                }
+
+                return $this->callGeminiHtml($prompt, $apiKey, $model);
+            } catch (ValidationException $e) {
+                $last = $e;
+                $msg = $this->extractValidationMessage($e);
+
+                Log::warning('Gemini generate failed', [
+                    'model' => $model,
+                    'message' => $msg,
+                ]);
+
+                if (str_contains(strtolower($msg), 'limit: 0, model:')) {
+                    throw ValidationException::withMessages([
+                        'ai' => [
+                            "Model {$model} belum punya kuota di project API key ini (limit: 0). " .
+                            "Pakai model lain yang tersedia atau set billing/kuota di Google AI Studio."
+                        ],
+                    ]);
+                }
+
+                if ($idx === count($models) - 1 || !$this->isRetryableAiError($msg)) {
+                    throw $e;
+                }
+            }
+        }
+
+        if ($last instanceof ValidationException) {
+            throw $last;
+        }
+
+        throw ValidationException::withMessages([
+            'ai' => ['Generate gagal. Coba lagi sebentar.'],
+        ]);
+    }
+
+    private function extractValidationMessage(ValidationException $e): string
+    {
+        $errors = $e->errors();
+        if (isset($errors['ai'][0])) {
+            return (string) $errors['ai'][0];
+        }
+
+        return (string) $e->getMessage();
+    }
+
+    private function isRetryableAiError(string $message): bool
+    {
+        $text = strtolower($message);
+
+        return str_contains($text, 'timeout')
+            || str_contains($text, 'terputus')
+            || str_contains($text, 'too many requests')
+            || str_contains($text, 'resource exhausted')
+            || str_contains($text, 'http 429')
+            || str_contains($text, 'http 500')
+            || str_contains($text, 'http 503');
+    }
+
     private function callGeminiHtml(string $prompt, string $apiKey, string $model): string
     {
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
         $full = '';
-        $maxTurns = 6;
+        $maxTurns = max(2, min((int) env('GEMINI_MAX_TURNS', 6), 10));
         $startedAt = microtime(true);
-        $hardDeadlineSeconds = 240.0;
+        $hardDeadlineSeconds = (float) env('GEMINI_HARD_DEADLINE_SECONDS', 150);
+        $hardDeadlineSeconds = max(40, min($hardDeadlineSeconds, 540));
 
         $contents = [
             ['role' => 'user', 'parts' => [['text' => $prompt]]],
@@ -123,24 +507,26 @@ class LandingGenerateController extends Controller
         for ($i = 0; $i < $maxTurns; $i++) {
             $elapsed = microtime(true) - $startedAt;
             $remaining = $hardDeadlineSeconds - $elapsed;
-            if ($remaining <= 8) {
+            if ($remaining <= 10) {
                 break;
             }
 
-            $timeoutSeconds = (int) max(20, min(90, floor($remaining - 5)));
+            $baseTurnTimeout = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 45);
+            $baseTurnTimeout = max(12, min($baseTurnTimeout, 90));
+            $timeoutSeconds = (int) max(12, min($baseTurnTimeout, floor($remaining - 4)));
 
             try {
                 /** @var Response $resp */
                 $resp = Http::connectTimeout(15)
                     ->timeout($timeoutSeconds)
-                    ->retry(2, 800)
+                    ->retry(0, 0)
                     ->acceptJson()
                     ->asJson()
                     ->post($url . '?key=' . $apiKey, [
                         'contents' => $contents,
                         'generationConfig' => [
                             'temperature' => 0.45,
-                            'maxOutputTokens' => 4096,
+                            'maxOutputTokens' => 2800,
                         ],
                     ]);
             } catch (ConnectionException $e) {
@@ -183,9 +569,19 @@ class LandingGenerateController extends Controller
         }
 
         if (!$this->looksLikeCompleteHtml($full)) {
+            $continued = $this->continueIncompleteHtml($full, $apiKey, $model, $url);
+            if ($this->looksLikeCompleteHtml($continued)) {
+                return $continued;
+            }
+
             $repaired = $this->repairIncompleteHtml($full, $apiKey, $url);
             if ($this->looksLikeCompleteHtml($repaired)) {
                 return $repaired;
+            }
+
+            $finalized = $this->finalizeHtmlBestEffort($repaired);
+            if ($this->looksLikeCompleteHtml($finalized)) {
+                return $finalized;
             }
 
             throw ValidationException::withMessages([
@@ -199,7 +595,7 @@ class LandingGenerateController extends Controller
     private function repairIncompleteHtml(string $partialHtml, string $apiKey, string $url): string
     {
         $repairPrompt = <<<PROMPT
-Lengkapi HTML company profile berikut karena output sebelumnya terpotong.
+Lengkapi HTML berikut karena output sebelumnya terpotong.
 
 ATURAN:
 - Kembalikan HTML lengkap dari `<!doctype html>` sampai `</html>`.
@@ -215,8 +611,8 @@ PROMPT;
         try {
             /** @var Response $resp */
             $resp = Http::connectTimeout(15)
-                ->timeout(60)
-                ->retry(2, 800)
+                ->timeout(35)
+                ->retry(0, 0)
                 ->acceptJson()
                 ->asJson()
                 ->post($url . '?key=' . $apiKey, [
@@ -225,7 +621,7 @@ PROMPT;
                     ],
                     'generationConfig' => [
                         'temperature' => 0.2,
-                        'maxOutputTokens' => 4096,
+                        'maxOutputTokens' => 2800,
                     ],
                 ]);
         } catch (ConnectionException $e) {
@@ -245,6 +641,83 @@ PROMPT;
         $fixed = trim($fixed);
 
         return $fixed !== '' ? $fixed : $partialHtml;
+    }
+
+    private function continueIncompleteHtml(string $partialHtml, string $apiKey, string $model, string $url): string
+    {
+        $full = trim($partialHtml);
+        $maxTurns = 2;
+
+        for ($i = 0; $i < $maxTurns; $i++) {
+            if ($this->looksLikeCompleteHtml($full)) {
+                return $full;
+            }
+
+            $prompt = <<<PROMPT
+Lanjutkan HTML ini tepat dari karakter terakhir.
+- Jangan ulangi dari awal.
+- Hanya kirim sisa yang belum ada sampai penutup lengkap.
+- Akhiri dengan `</body></html><!-- END -->`.
+
+HTML SAAT INI:
+{$full}
+PROMPT;
+
+            try {
+                /** @var Response $resp */
+                $resp = Http::connectTimeout(15)
+                    ->timeout(30)
+                    ->retry(0, 0)
+                    ->acceptJson()
+                    ->asJson()
+                    ->post($url . '?key=' . $apiKey, [
+                        'contents' => [
+                            ['role' => 'user', 'parts' => [['text' => $prompt]]],
+                        ],
+                        'generationConfig' => [
+                            'temperature' => 0.2,
+                            'maxOutputTokens' => 2000,
+                        ],
+                    ]);
+            } catch (ConnectionException $e) {
+                return $full;
+            }
+
+            if (!$resp instanceof Response || $resp->failed()) {
+                return $full;
+            }
+
+            $tail = trim(str_replace('<!-- END -->', '', $this->extractTextFromGeminiResponse($resp)));
+            if ($tail === '') {
+                return $full;
+            }
+
+            if (preg_match('/<!doctype html>/i', $tail) === 1) {
+                $full = $tail;
+            } else {
+                $full .= $tail;
+            }
+        }
+
+        return trim($full);
+    }
+
+    private function finalizeHtmlBestEffort(string $html): string
+    {
+        $out = trim(str_replace('<!-- END -->', '', $html));
+        if ($out === '') {
+            return $out;
+        }
+
+        if (preg_match('/<body\b/i', $out) === 1 && preg_match('/<\/body>/i', $out) !== 1) {
+            $out .= "\n</body>";
+        }
+
+        if (preg_match('/<html\b/i', $out) === 1 && preg_match('/<\/html>/i', $out) !== 1) {
+            $out .= "\n</html>";
+        }
+
+        return trim($out);
     }
 
     private function extractTextFromGeminiResponse(Response $resp): string

@@ -495,7 +495,8 @@ HTML;
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
         $full = '';
-        $maxTurns = max(2, min((int) env('GEMINI_MAX_TURNS', 6), 10));
+        // Balance between quota usage and completeness for long prompts.
+        $maxTurns = max(1, min((int) env('GEMINI_MAX_TURNS', 4), 5));
         $startedAt = microtime(true);
         $hardDeadlineSeconds = (float) env('GEMINI_HARD_DEADLINE_SECONDS', 150);
         $hardDeadlineSeconds = max(40, min($hardDeadlineSeconds, 540));
@@ -511,9 +512,11 @@ HTML;
                 break;
             }
 
-            $baseTurnTimeout = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 45);
+            $baseTurnTimeout = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 40);
             $baseTurnTimeout = max(12, min($baseTurnTimeout, 90));
             $timeoutSeconds = (int) max(12, min($baseTurnTimeout, floor($remaining - 4)));
+            $maxOutputTokens = (int) env('GEMINI_MAX_OUTPUT_TOKENS', 3600);
+            $maxOutputTokens = max(1200, min($maxOutputTokens, 8192));
 
             try {
                 /** @var Response $resp */
@@ -526,7 +529,7 @@ HTML;
                         'contents' => $contents,
                         'generationConfig' => [
                             'temperature' => 0.45,
-                            'maxOutputTokens' => 2800,
+                            'maxOutputTokens' => $maxOutputTokens,
                         ],
                     ]);
             } catch (ConnectionException $e) {
@@ -582,6 +585,11 @@ HTML;
             $finalized = $this->finalizeHtmlBestEffort($repaired);
             if ($this->looksLikeCompleteHtml($finalized)) {
                 return $finalized;
+            }
+
+            $wrapped = $this->forceHtmlWrapper($finalized !== '' ? $finalized : $repaired);
+            if ($this->looksLikeCompleteHtml($wrapped)) {
+                return $wrapped;
             }
 
             throw ValidationException::withMessages([
@@ -714,6 +722,40 @@ PROMPT;
         }
 
         if (preg_match('/<html\b/i', $out) === 1 && preg_match('/<\/html>/i', $out) !== 1) {
+            $out .= "\n</html>";
+        }
+
+        return trim($out);
+    }
+
+    private function forceHtmlWrapper(string $html): string
+    {
+        $out = trim(str_replace('<!-- END -->', '', $html));
+        if ($out === '') {
+            return $out;
+        }
+
+        if (preg_match('/<!doctype html>/i', $out) !== 1) {
+            $out = "<!doctype html>\n" . $out;
+        }
+
+        if (preg_match('/<html\b/i', $out) !== 1) {
+            $out = "<html lang=\"id\">\n" . $out;
+        }
+
+        if (preg_match('/<body\b/i', $out) !== 1) {
+            if (preg_match('/<head\b[\s\S]*?<\/head>/i', $out) === 1) {
+                $out = preg_replace('/<\/head>/i', "</head>\n<body>", $out, 1) ?? $out;
+            } else {
+                $out = preg_replace('/<html[^>]*>/i', "$0\n<body>", $out, 1) ?? $out;
+            }
+        }
+
+        if (preg_match('/<\/body>/i', $out) !== 1) {
+            $out .= "\n</body>";
+        }
+
+        if (preg_match('/<\/html>/i', $out) !== 1) {
             $out .= "\n</html>";
         }
 

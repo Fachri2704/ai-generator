@@ -293,30 +293,39 @@ export default function App() {
         <div className="shell">
           <div className="navBar">
             {view === "generator" && user ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="btnSmall"
-                  onClick={() => setGeneratorMode("landing")}
-                  disabled={generatorMode === "landing"}
-                >
-                  AiToLandingPage
-                </button>
-                <button
-                  type="button"
-                  className="btnSmall"
-                  onClick={() => setGeneratorMode("company")}
-                  disabled={generatorMode === "company"}
-                >
-                  AiToCompro
-                </button>
+              <div>
+                <p className="generatorIntro">
+                  {generatorMode === "landing"
+                    ? "Generate landing pages in seconds, lebih cepat, lebih mudah, dan siap pakai dengan AI."
+                    : "Generate company profile website dengan struktur professional dari brief bisnis kamu"}
+                </p>
+                <div className="modeSwitch">
+                  <button
+                    type="button"
+                    className={`modeButton ${generatorMode === "landing" ? "modeButtonActive" : ""}`}
+                    onClick={() => setGeneratorMode("landing")}
+                  >
+                    AiToLandingPage
+                  </button>
+                  <button
+                    type="button"
+                    className={`modeButton ${generatorMode === "company" ? "modeButtonActive" : ""}`}
+                    onClick={() => setGeneratorMode("company")}
+                  >
+                    AiToCompro
+                  </button>
+                </div>
               </div>
             ) : (
               <p className="tagline">Generate clean, ready to use landing pages in seconds</p>
             )}
           </div>
 
-          {authMsg && <div className="mt-3 text-[12px] md:text-[13px] text-green-700">{authMsg}</div>}
+          {authMsg && (
+            <div className="mt-3 text-[12px] md:text-[13px]" style={{ color: "#11EF36" }}>
+              {authMsg}
+            </div>
+          )}
           {authErr && <div className="mt-3 text-[12px] md:text-[13px] text-red-600">{authErr}</div>}
 
           {view === "login" ? (
@@ -438,7 +447,7 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <h2 className="text-[14px] md:text-[16px] font-semibold text-[#111111]">Output</h2>
                     <button
-                      className="btnSmall"
+                      className="btnCopy"
                       disabled={!html}
                       onClick={() => navigator.clipboard.writeText(html)}
                     >
@@ -457,7 +466,7 @@ export default function App() {
                 </div>
 
                 <div className="grid gap-2">
-                  <div className="text-[13px] md:text-[14px] font-semibold text-[#111111]">Preview</div>
+                  <div className="previewLabel">Preview</div>
                   <div className="previewCard" style={{ height: `${previewHeight}px` }}>
                     <iframe title="preview" className="h-full w-full" srcDoc={html} />
                   </div>

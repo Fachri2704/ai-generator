@@ -148,13 +148,6 @@ function AiToCompro() {
 
   return (
     <div className="aitcWrap">
-      <div className="aitcHead">
-        <h1 className="aitcTitle">AiToCompro</h1>
-        <p className="aitcSubtitle">
-          Generate company profile website dengan struktur profesional dari brief bisnis kamu.
-        </p>
-      </div>
-
       <div className="aitcGrid">
         <section className="aitcFormCol">
           <div ref={formCardRef} className="aitcCard aitcFormCard">

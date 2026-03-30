@@ -1,0 +1,124 @@
+.mainMenuPage {
+  margin-top: 1.5rem;
+}
+
+.mainMenuHero {
+  padding: 6px 6px 2px;
+}
+
+.mainMenuHeroInner {
+  text-align: center;
+}
+
+.mainMenuTitle {
+  margin: 0;
+  color: #fffdf2;
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.mainMenuSubtitle {
+  margin: 0.35rem 0 0;
+  color: #f1f7ea;
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.mainMenuGrid {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+}
+
+.mainMenuCard {
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 20px;
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  background: var(--surface-card-soft);
+  padding: 24px 22px 20px;
+  box-shadow: 0 10px 22px rgba(9, 25, 17, 0.12);
+}
+
+.mainMenuCardTitle {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1.18;
+}
+
+.mainMenuCardText {
+  margin: 14px 0 0;
+  color: #20382c;
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.mainMenuButton {
+  width: 100%;
+  min-height: 54px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--button-green-dark);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.mainMenuButton:hover {
+  background: #022417;
+  transform: translateY(-1px);
+}
+
+@media (min-width: 900px) {
+  .mainMenuHero {
+    padding: 12px 22px 6px;
+  }
+
+  .mainMenuGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+    padding: 0 18px;
+  }
+}
+
+@media (max-width: 767px) {
+  .mainMenuHero {
+    padding: 4px 0 2px;
+  }
+
+  .mainMenuTitle {
+    font-size: 1.3rem;
+  }
+
+  .mainMenuSubtitle {
+    font-size: 1.08rem;
+  }
+
+  .mainMenuCard {
+    min-height: auto;
+    padding: 18px 16px 16px;
+  }
+
+  .mainMenuCardTitle {
+    font-size: 1.35rem;
+  }
+
+  .mainMenuCardText {
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+
+  .mainMenuButton {
+    min-height: 48px;
+  }
+}

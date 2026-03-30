@@ -101,6 +101,10 @@ body {
     color: #f5f8ed;
   }
 
+  .generatorIntroBlock {
+    @apply flex flex-col gap-2;
+  }
+
   .modeSwitch {
     @apply flex flex-wrap items-center gap-2;
   }

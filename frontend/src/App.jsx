@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import AiToCompro from "./pages/AiToCompro";
+import MainMenuPage from "./pages/MainMenuPage";
 
 const USER_STORAGE_KEY = "ai-landing-auth-user";
 
@@ -44,7 +45,7 @@ const parseRetrySeconds = (message) => {
 };
 
 export default function App() {
-  const [view, setView] = useState(() => (getStoredUser() ? "generator" : "login"));
+  const [view, setView] = useState(() => (getStoredUser() ? "main-menu" : "login"));
   const [user, setUser] = useState(getStoredUser);
   const [generatorMode, setGeneratorMode] = useState("landing");
 
@@ -166,7 +167,7 @@ export default function App() {
       }
 
       setLoggedInUser(data.user);
-      setView("generator");
+      setView("main-menu");
       setLoginForm({ email: "", password: "" });
       setAuthMsg("Login berhasil.");
     } catch (e2) {
@@ -261,7 +262,7 @@ export default function App() {
           <button
             className="navTitle border-0 bg-transparent p-0 text-left"
             type="button"
-            onClick={() => setView(user ? "generator" : "login")}
+            onClick={() => setView(user ? "main-menu" : "login")}
           >
             AI Website Generator
           </button>
@@ -293,7 +294,7 @@ export default function App() {
         <div className="shell">
           <div className="navBar">
             {view === "generator" && user ? (
-              <div>
+              <div className="generatorIntroBlock">
                 <p className="generatorIntro">
                   {generatorMode === "landing"
                     ? "Generate landing pages in seconds, lebih cepat, lebih mudah, dan siap pakai dengan AI."
@@ -316,6 +317,8 @@ export default function App() {
                   </button>
                 </div>
               </div>
+            ) : view === "main-menu" && user ? (
+              <div />
             ) : (
               <p className="tagline">Generate clean, ready to use landing pages in seconds</p>
             )}
@@ -343,6 +346,15 @@ export default function App() {
               onChange={onRegisterChange}
               onSubmit={register}
               loading={authLoading}
+            />
+          ) : null}
+
+          {view === "main-menu" && user ? (
+            <MainMenuPage
+              onSelect={(mode) => {
+                setGeneratorMode(mode);
+                setView("generator");
+              }}
             />
           ) : null}
 

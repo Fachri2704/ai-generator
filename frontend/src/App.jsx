@@ -44,10 +44,32 @@ const parseRetrySeconds = (message) => {
   return Number.isFinite(sec) ? sec : null;
 };
 
+const LANDING_REQUIRED_FIELDS = [
+  ["company_name", "Nama Brand / Bisnis"],
+  ["product", "Produk / Program"],
+  ["audience", "Target Audiens"],
+  ["main_offer", "Headline Penawaran Utama"],
+  ["price_note", "Harga / Promo Singkat"],
+  ["tone", "Tone"],
+  ["cta", "CTA Utama"],
+];
+
+const findMissingFields = (values, requiredFields) =>
+  requiredFields
+    .filter(([key]) => String(values[key] ?? "").trim() === "")
+    .map(([, label]) => label);
+
 export default function App() {
   const [view, setView] = useState(() => (getStoredUser() ? "main-menu" : "login"));
   const [user, setUser] = useState(getStoredUser);
   const [generatorMode, setGeneratorMode] = useState("landing");
+  const [successPopup, setSuccessPopup] = useState({
+    open: false,
+    title: "",
+    message: "",
+    nextView: null,
+    nextUser: null,
+  });
 
   const [form, setForm] = useState({
     company_name: "",
@@ -81,6 +103,7 @@ export default function App() {
   const [authErr, setAuthErr] = useState("");
   const [authMsg, setAuthMsg] = useState("");
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
+  const [validationPopup, setValidationPopup] = useState({ open: false, message: "" });
   const [errorPopup, setErrorPopup] = useState({ open: false, message: "" });
   const [previewHeight, setPreviewHeight] = useState(520);
   const formCardRef = useRef(null);
@@ -107,6 +130,30 @@ export default function App() {
       setGeneratorMode("landing");
       setAuthMsg("Kamu sudah logout.");
     }
+  };
+
+  const goToView = (nextView) => {
+    setAuthMsg("");
+    setAuthErr("");
+    setView(nextView);
+  };
+
+  const closeSuccessPopup = () => {
+    if (successPopup.nextUser) {
+      setLoggedInUser(successPopup.nextUser);
+    }
+
+    if (successPopup.nextView) {
+      setView(successPopup.nextView);
+    }
+
+    setSuccessPopup({
+      open: false,
+      title: "",
+      message: "",
+      nextView: null,
+      nextUser: null,
+    });
   };
 
   const register = async (e) => {
@@ -137,7 +184,13 @@ export default function App() {
         password: "",
         password_confirmation: "",
       });
-      setView("login");
+      setSuccessPopup({
+        open: true,
+        title: "Registrasi Berhasil",
+        message: "Akun kamu berhasil dibuat. Klik lanjut untuk masuk ke halaman login.",
+        nextView: "login",
+        nextUser: null,
+      });
     } catch (e2) {
       setAuthErr(String(e2.message || e2));
     } finally {
@@ -166,10 +219,15 @@ export default function App() {
         throw new Error(readErrorMessage(data));
       }
 
-      setLoggedInUser(data.user);
-      setView("main-menu");
+      setAuthMsg("");
       setLoginForm({ email: "", password: "" });
-      setAuthMsg("Login berhasil.");
+      setSuccessPopup({
+        open: true,
+        title: "Login Berhasil",
+        message: "Kamu berhasil login. Klik lanjut untuk masuk ke main menu.",
+        nextView: "main-menu",
+        nextUser: data.user,
+      });
     } catch (e2) {
       setAuthErr(String(e2.message || e2));
     } finally {
@@ -178,8 +236,20 @@ export default function App() {
   };
 
   const generate = async () => {
+    const missingFields = findMissingFields(form, LANDING_REQUIRED_FIELDS);
+    if (missingFields.length > 0) {
+      setLimitPopup({ open: false, retryIn: null });
+      setErrorPopup({ open: false, message: "" });
+      setValidationPopup({
+        open: true,
+        message: `Lengkapi field wajib berikut dulu: ${missingFields.join(", ")}.`,
+      });
+      return;
+    }
+
     setLoading(true);
     setLimitPopup({ open: false, retryIn: null });
+    setValidationPopup({ open: false, message: "" });
     setErrorPopup({ open: false, message: "" });
     setHtml("");
 
@@ -262,7 +332,7 @@ export default function App() {
           <button
             className="navTitle border-0 bg-transparent p-0 text-left"
             type="button"
-            onClick={() => setView(user ? "main-menu" : "login")}
+            onClick={() => goToView(user ? "main-menu" : "login")}
           >
             AI Website Generator
           </button>
@@ -277,11 +347,11 @@ export default function App() {
               </>
             ) : (
               <>
-                <button className="navLink" type="button" onClick={() => setView("login")}>
+                <button className="navLink" type="button" onClick={() => goToView("login")}>
                   Login
                 </button>
                 <span className="navDivider">|</span>
-                <button className="navLink" type="button" onClick={() => setView("register")}>
+                <button className="navLink" type="button" onClick={() => goToView("register")}>
                   Register
                 </button>
               </>
@@ -352,6 +422,8 @@ export default function App() {
           {view === "main-menu" && user ? (
             <MainMenuPage
               onSelect={(mode) => {
+                setAuthMsg("");
+                setAuthErr("");
                 setGeneratorMode(mode);
                 setView("generator");
               }}
@@ -516,6 +588,22 @@ export default function App() {
         </div>
       ) : null}
 
+      {validationPopup.open && generatorMode === "landing" ? (
+        <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Form belum lengkap">
+          <div className="alertPopup">
+            <div className="alertTitle">Form Belum Lengkap</div>
+            <div className="alertText">{validationPopup.message}</div>
+            <button
+              type="button"
+              className="btnSmall mt-4"
+              onClick={() => setValidationPopup({ open: false, message: "" })}
+            >
+              Oke
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {errorPopup.open && generatorMode === "landing" ? (
         <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Generate gagal">
           <div className="alertPopup">
@@ -527,6 +615,18 @@ export default function App() {
               onClick={() => setErrorPopup({ open: false, message: "" })}
             >
               Tutup
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {successPopup.open ? (
+        <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Aksi berhasil">
+          <div className="alertPopup">
+            <div className="alertTitle">{successPopup.title}</div>
+            <div className="alertText">{successPopup.message}</div>
+            <button type="button" className="btnSmall mt-4" onClick={closeSuccessPopup}>
+              Lanjut
             </button>
           </div>
         </div>

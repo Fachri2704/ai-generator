@@ -52,11 +52,26 @@ const parseRetrySeconds = (message) => {
   return Number.isFinite(sec) ? sec : null;
 };
 
+const COMPANY_REQUIRED_FIELDS = [
+  ["company_name", "Nama Perusahaan"],
+  ["industry", "Industri"],
+  ["company_overview", "Ringkasan Perusahaan"],
+  ["services", "Layanan Utama"],
+  ["tone", "Tone"],
+  ["cta", "Teks CTA Utama"],
+];
+
+const findMissingFields = (values, requiredFields) =>
+  requiredFields
+    .filter(([key]) => String(values[key] ?? "").trim() === "")
+    .map(([, label]) => label);
+
 function AiToCompro() {
   const [form, setForm] = useState(defaultForm);
   const [loading, setLoading] = useState(false);
   const [html, setHtml] = useState("");
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
+  const [validationPopup, setValidationPopup] = useState({ open: false, message: "" });
   const [errorPopup, setErrorPopup] = useState({ open: false, message: "" });
   const [previewHeight, setPreviewHeight] = useState(520);
 
@@ -68,8 +83,20 @@ function AiToCompro() {
   };
 
   const generate = async () => {
+    const missingFields = findMissingFields(form, COMPANY_REQUIRED_FIELDS);
+    if (missingFields.length > 0) {
+      setLimitPopup({ open: false, retryIn: null });
+      setErrorPopup({ open: false, message: "" });
+      setValidationPopup({
+        open: true,
+        message: `Lengkapi field wajib berikut dulu: ${missingFields.join(", ")}.`,
+      });
+      return;
+    }
+
     setLoading(true);
     setLimitPopup({ open: false, retryIn: null });
+    setValidationPopup({ open: false, message: "" });
     setErrorPopup({ open: false, message: "" });
     setHtml("");
 
@@ -358,6 +385,22 @@ function AiToCompro() {
             </div>
             <button type="button" className="btnSmall mt-4" onClick={() => setLimitPopup({ open: false, retryIn: null })}>
               Oke, Mengerti
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {validationPopup.open ? (
+        <div className="alertOverlay" role="alertdialog" aria-modal="true" aria-label="Form belum lengkap">
+          <div className="alertPopup">
+            <div className="alertTitle">Form Belum Lengkap</div>
+            <div className="alertText">{validationPopup.message}</div>
+            <button
+              type="button"
+              className="btnSmall mt-4"
+              onClick={() => setValidationPopup({ open: false, message: "" })}
+            >
+              Oke
             </button>
           </div>
         </div>

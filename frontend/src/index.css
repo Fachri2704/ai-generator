@@ -150,6 +150,40 @@ body {
     height: 40px;
   }
 
+  .inputWrap {
+    @apply relative mt-1;
+  }
+
+  .inputWrap .input {
+    @apply mt-0;
+  }
+
+  .inputWithAction {
+    padding-right: 4.75rem;
+  }
+
+  .inputAction {
+    @apply absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border-0 bg-transparent p-0;
+    color: var(--button-green-dark);
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  .inputAction:hover {
+    background: rgba(8, 120, 72, 0.1);
+    color: var(--button-green);
+  }
+
+  .inputAction:focus-visible {
+    outline: 2px solid rgba(8, 120, 72, 0.35);
+    outline-offset: 2px;
+  }
+
+  .inputActionIcon {
+    width: 18px;
+    height: 18px;
+  }
+
   .inputCompact {
     @apply text-[13px];
     height: 36px;

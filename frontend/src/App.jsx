@@ -32,16 +32,30 @@ const isQuotaLimitError = (message) => {
     text.includes("rate limit") ||
     text.includes("exceeded your current quota") ||
     text.includes("too many requests") ||
-    text.includes("retry in")
+    text.includes("retry in") ||
+    text.includes("resource exhausted") ||
+    text.includes("server ai sedang padat") ||
+    text.includes("request ke ai sedang terlalu banyak") ||
+    text.includes("layanan ai sedang cooldown")
   );
 };
 
 const parseRetrySeconds = (message) => {
   const text = String(message || "");
-  const match = text.match(/retry in\s+([\d.]+)s/i);
-  if (!match?.[1]) return null;
-  const sec = Math.ceil(Number(match[1]));
-  return Number.isFinite(sec) ? sec : null;
+  const patterns = [
+    /retry in\s+([\d.]+)s/i,
+    /sekitar\s+([\d.]+)\s*detik/i,
+    /([\d.]+)\s*detik\s+lagi/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const sec = Math.ceil(Number(match[1]));
+    if (Number.isFinite(sec)) return sec;
+  }
+
+  return null;
 };
 
 const LANDING_REQUIRED_FIELDS = [
@@ -105,8 +119,10 @@ export default function App() {
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
   const [validationPopup, setValidationPopup] = useState({ open: false, message: "" });
   const [errorPopup, setErrorPopup] = useState({ open: false, message: "" });
+  const [generationNotice, setGenerationNotice] = useState("");
   const [previewHeight, setPreviewHeight] = useState(520);
   const formCardRef = useRef(null);
+  const codeBoxRef = useRef(null);
 
   const onChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
   const onLoginChange = (e) => setLoginForm({ ...loginForm, [e.target.name]: e.target.value });
@@ -251,6 +267,8 @@ export default function App() {
     setLimitPopup({ open: false, retryIn: null });
     setValidationPopup({ open: false, message: "" });
     setErrorPopup({ open: false, message: "" });
+    setGenerationNotice("");
+    const shouldForceRefresh = html.trim() !== "";
     setHtml("");
 
     try {
@@ -260,7 +278,7 @@ export default function App() {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, force_refresh: shouldForceRefresh }),
       });
 
       const contentType = res.headers.get("content-type") || "";
@@ -279,6 +297,7 @@ export default function App() {
       }
 
       setHtml(data.html);
+      setGenerationNotice(typeof data.notice === "string" ? data.notice : "");
     } catch (e) {
       const message = String(e.message || e);
       if (isQuotaLimitError(message)) {
@@ -324,6 +343,12 @@ export default function App() {
       window.removeEventListener("resize", syncPreviewWithForm);
     };
   }, [view, user, form]);
+
+  useEffect(() => {
+    if (!codeBoxRef.current) return;
+    codeBoxRef.current.scrollTop = 0;
+    codeBoxRef.current.scrollLeft = 0;
+  }, [html]);
 
   return (
     <div className="pageWrap">
@@ -519,7 +544,7 @@ export default function App() {
                     />
 
                     <button onClick={generate} disabled={loading} className="btnPrimary mt-1">
-                      {loading ? "Generating..." : "Generate Landing Page"}
+                      {loading ? "Generating..." : html ? "Generate Ulang Landing Page" : "Generate Landing Page"}
                     </button>
 
                   </div>
@@ -539,8 +564,18 @@ export default function App() {
                     </button>
                   </div>
 
+                  {generationNotice ? (
+                    <div
+                      className="mt-3 rounded-xl border px-3 py-2 text-[12px] md:text-[13px]"
+                      style={{ borderColor: "#D6E4FF", background: "#F5F9FF", color: "#1849A9" }}
+                    >
+                      {generationNotice}
+                    </div>
+                  ) : null}
+
                   <div className="mt-3 grid gap-3">
                     <textarea
+                      ref={codeBoxRef}
                       className="codeBox"
                       value={html}
                       readOnly

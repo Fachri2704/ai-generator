@@ -40,16 +40,30 @@ const isQuotaLimitError = (message) => {
     text.includes("rate limit") ||
     text.includes("exceeded your current quota") ||
     text.includes("too many requests") ||
-    text.includes("retry in")
+    text.includes("retry in") ||
+    text.includes("resource exhausted") ||
+    text.includes("server ai sedang padat") ||
+    text.includes("request ke ai sedang terlalu banyak") ||
+    text.includes("layanan ai sedang cooldown")
   );
 };
 
 const parseRetrySeconds = (message) => {
   const text = String(message || "");
-  const match = text.match(/retry in\s+([\d.]+)s/i);
-  if (!match?.[1]) return null;
-  const sec = Math.ceil(Number(match[1]));
-  return Number.isFinite(sec) ? sec : null;
+  const patterns = [
+    /retry in\s+([\d.]+)s/i,
+    /sekitar\s+([\d.]+)\s*detik/i,
+    /([\d.]+)\s*detik\s+lagi/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const sec = Math.ceil(Number(match[1]));
+    if (Number.isFinite(sec)) return sec;
+  }
+
+  return null;
 };
 
 const COMPANY_REQUIRED_FIELDS = [
@@ -73,9 +87,11 @@ function AiToCompro() {
   const [limitPopup, setLimitPopup] = useState({ open: false, retryIn: null });
   const [validationPopup, setValidationPopup] = useState({ open: false, message: "" });
   const [errorPopup, setErrorPopup] = useState({ open: false, message: "" });
+  const [generationNotice, setGenerationNotice] = useState("");
   const [previewHeight, setPreviewHeight] = useState(520);
 
   const formCardRef = useRef(null);
+  const codeBoxRef = useRef(null);
 
   const onChange = (event) => {
     const { name, value } = event.target;
@@ -98,6 +114,8 @@ function AiToCompro() {
     setLimitPopup({ open: false, retryIn: null });
     setValidationPopup({ open: false, message: "" });
     setErrorPopup({ open: false, message: "" });
+    setGenerationNotice("");
+    const shouldForceRefresh = html.trim() !== "";
     setHtml("");
 
     try {
@@ -107,7 +125,7 @@ function AiToCompro() {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, force_refresh: shouldForceRefresh }),
       });
 
       const contentType = res.headers.get("content-type") || "";
@@ -126,6 +144,7 @@ function AiToCompro() {
       }
 
       setHtml(data.html || "");
+      setGenerationNotice(typeof data.notice === "string" ? data.notice : "");
     } catch (error) {
       const message = String(error.message || error);
       if (isQuotaLimitError(message)) {
@@ -172,6 +191,12 @@ function AiToCompro() {
       window.removeEventListener("resize", syncPreviewWithForm);
     };
   }, [form]);
+
+  useEffect(() => {
+    if (!codeBoxRef.current) return;
+    codeBoxRef.current.scrollTop = 0;
+    codeBoxRef.current.scrollLeft = 0;
+  }, [html]);
 
   return (
     <div className="aitcWrap">
@@ -327,7 +352,7 @@ function AiToCompro() {
               />
 
               <button type="button" onClick={generate} disabled={loading} className="aitcButton">
-                {loading ? "Generating..." : "Generate Company Profile"}
+                {loading ? "Generating..." : html ? "Generate Ulang Company Profile" : "Generate Company Profile"}
               </button>
 
             </div>
@@ -348,7 +373,25 @@ function AiToCompro() {
               </button>
             </div>
 
+            {generationNotice ? (
+              <div
+                style={{
+                  marginTop: "12px",
+                  padding: "10px 12px",
+                  borderRadius: "14px",
+                  border: "1px solid #d6e4ff",
+                  background: "#f5f9ff",
+                  color: "#1849a9",
+                  fontSize: "13px",
+                  lineHeight: 1.5,
+                }}
+              >
+                {generationNotice}
+              </div>
+            ) : null}
+
             <textarea
+              ref={codeBoxRef}
               className="aitcCode"
               value={html}
               readOnly

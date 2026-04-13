@@ -44,6 +44,18 @@ class LandingGenerateController extends Controller
         try {
             $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
         } catch (ValidationException $e) {
+            $msg = $this->extractValidationMessage($e);
+            if ($this->shouldServeFallbackHtml($msg)) {
+                Log::warning('Serving local landing fallback HTML', [
+                    'message' => $msg,
+                ]);
+
+                return response()->json([
+                    'html' => $this->buildLandingFallbackHtml($data),
+                    'fallback' => true,
+                ]);
+            }
+
             throw $e;
         } catch (\Throwable $e) {
             Log::error('Generate landing failed', [
@@ -101,6 +113,18 @@ class LandingGenerateController extends Controller
         try {
             $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
         } catch (ValidationException $e) {
+            $msg = $this->extractValidationMessage($e);
+            if ($this->shouldServeFallbackHtml($msg)) {
+                Log::warning('Serving local company profile fallback HTML', [
+                    'message' => $msg,
+                ]);
+
+                return response()->json([
+                    'html' => $this->buildCompanyProfileFallbackHtml($data),
+                    'fallback' => true,
+                ]);
+            }
+
             throw $e;
         } catch (\Throwable $e) {
             Log::error('Generate company profile failed', [
@@ -123,6 +147,419 @@ class LandingGenerateController extends Controller
         $seconds = max(60, min($seconds, 600));
         @ini_set('max_execution_time', (string) $seconds);
         @set_time_limit($seconds);
+    }
+
+    private function buildLandingFallbackHtml(array $d): string
+    {
+        $theme = $this->pickFallbackTheme();
+        $company = $this->e($d['company_name'] ?? 'Brand Anda');
+        $product = $this->e($d['product'] ?? 'Produk unggulan');
+        $audience = $this->e($d['audience'] ?? 'Audiens yang ingin hasil lebih cepat dan terarah.');
+        $offer = $this->e($d['main_offer'] ?? "Solusi praktis untuk {$product} dengan hasil yang lebih terukur.");
+        $price = $this->e($d['price_note'] ?? 'Hubungi kami untuk penawaran terbaik hari ini.');
+        $bonus = $this->e($d['bonus'] ?? 'Bonus onboarding, panduan implementasi, dan support awal.');
+        $urgency = $this->e($d['urgency'] ?? 'Slot promo terbatas untuk batch pendaftaran saat ini.');
+        $cta = $this->e($d['cta'] ?? 'Daftar Sekarang');
+        $contact = $this->e($d['contact'] ?? 'Tim kami siap membantu konsultasi lebih lanjut.');
+        $brandColor = $this->normalizeColor($d['brand_color'] ?? $theme['primary']);
+        $tone = strtolower((string) ($d['tone'] ?? 'profesional'));
+        $toneLine = match ($tone) {
+            'formal' => 'Pendekatan rapi, jelas, dan meyakinkan untuk membantu calon pelanggan mengambil keputusan.',
+            'santai' => 'Bahasa yang hangat, jelas, dan tetap fokus bikin calon pelanggan cepat paham manfaatnya.',
+            default => 'Copy yang profesional, fokus manfaat, dan tetap enak dibaca dari awal sampai CTA.',
+        };
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$company} - {$product}</title>
+  <style>
+    :root {
+      --primary: {$brandColor};
+      --accent: {$theme['heroB']};
+      --text: {$theme['text']};
+      --muted: {$theme['muted']};
+      --bg: #edf1f5;
+      --surface: #ffffff;
+      --border: {$theme['border']};
+      --btn-bg: {$brandColor};
+      --btn-text: #ffffff;
+      --btn-hover-bg: {$theme['footerBg']};
+      --btn-hover-text: #ffffff;
+      --success: #e8fff2;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(circle at top left, #ffffff 0, #edf1f5 45%, #e6ebf2 100%);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    h1, h2, h3, p { margin: 0; }
+    a { color: inherit; text-decoration: none; }
+    button, input, textarea {
+      font: inherit;
+      border: 0;
+      outline: 0;
+    }
+    .page-shell {
+      width: min(840px, calc(100vw - 24px));
+      margin: 0 auto;
+      padding: 20px 0 48px;
+    }
+    .page-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      overflow: hidden;
+      box-shadow: 0 30px 80px rgba(15, 23, 42, 0.10);
+    }
+    .section {
+      padding: 28px 22px;
+      border-top: 1px solid var(--border);
+    }
+    .hero {
+      padding: 34px 22px 28px;
+      background: linear-gradient(180deg, #ffffff 0%, {$theme['heroB']} 100%);
+    }
+    .promo-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.85);
+      border: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--primary);
+    }
+    .hero h1 {
+      margin-top: 18px;
+      font-size: clamp(1.9rem, 5vw, 3rem);
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+    }
+    .hero p {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+    .cta-wrap {
+      text-align: center;
+      margin-top: 20px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 14px 22px;
+      border-radius: 14px;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      font-weight: 700;
+      box-shadow: 0 14px 30px rgba(0,0,0,0.14);
+      transition: background .2s ease, color .2s ease, transform .2s ease;
+    }
+    .btn:hover {
+      background: var(--btn-hover-bg);
+      color: var(--btn-hover-text);
+      transform: translateY(-1px);
+    }
+    .trust-row, .grid-2, .grid-3 {
+      display: grid;
+      gap: 14px;
+    }
+    .trust-row { margin-top: 18px; grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: repeat(2, 1fr); }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .card {
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: #ffffff;
+    }
+    .soft {
+      background: #f8fafc;
+    }
+    .icon-badge {
+      width: 42px;
+      height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      background: {$theme['heroB']};
+      color: var(--primary);
+      font-size: 20px;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: clamp(1.3rem, 3vw, 1.8rem);
+      line-height: 1.2;
+      margin-bottom: 10px;
+    }
+    .section-intro {
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+    ul.clean {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+    ul.clean li + li {
+      margin-top: 8px;
+    }
+    .price-box {
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    }
+    .old-price {
+      color: #94a3b8;
+      text-decoration: line-through;
+      font-size: 15px;
+    }
+    .new-price {
+      display: block;
+      margin-top: 6px;
+      font-size: 1.8rem;
+      font-weight: 800;
+      color: var(--primary);
+    }
+    .note {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--success);
+      color: #166534;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .testimonial-name {
+      margin-top: 12px;
+      font-weight: 700;
+    }
+    .faq-item {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 0 16px;
+      background: #fff;
+    }
+    .faq-item + .faq-item {
+      margin-top: 12px;
+    }
+    .faq-item summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 16px 0;
+      font-weight: 700;
+    }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-answer {
+      padding: 0 0 16px;
+      color: var(--muted);
+    }
+    .form-stack {
+      display: grid;
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 13px 14px;
+      background: #ffffff;
+      color: var(--text);
+    }
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+    }
+    .footer {
+      background: {$theme['footerBg']};
+      color: {$theme['footerText']};
+    }
+    .footer p {
+      color: {$theme['footerText']};
+    }
+    .footer-cta {
+      color: #ffffff;
+      font-weight: 700;
+    }
+    @media (max-width: 760px) {
+      .grid-2, .grid-3, .trust-row {
+        grid-template-columns: 1fr;
+      }
+      .section, .hero {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+      .page-shell {
+        width: min(100vw - 12px, 840px);
+        padding-top: 10px;
+      }
+      .page-card {
+        border-radius: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page-shell">
+    <main class="page-card">
+      <section class="hero">
+        <span class="promo-pill">Promo aktif untuk {$product}</span>
+        <h1>{$offer}</h1>
+        <p>{$company} membantu {$audience}</p>
+        <p>{$toneLine}</p>
+        <div class="cta-wrap">
+          <a href="#form-order" class="btn">{$cta}</a>
+        </div>
+        <div class="trust-row">
+          <div class="card soft"><strong>Fokus manfaat</strong><p>Pesan utama dibuat jelas agar pengunjung cepat paham value-nya.</p></div>
+          <div class="card soft"><strong>Siap dipakai</strong><p>Struktur halaman sudah siap untuk presentasi, iklan, atau follow up penjualan.</p></div>
+          <div class="card soft"><strong>Responsive</strong><p>Tetap nyaman dibaca di desktop dan mobile dengan layout boxed yang rapi.</p></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Masalah yang Sering Dihadapi Calon Pelanggan</h2>
+        <p class="section-intro">Sebelum membeli {$product}, audiens biasanya butuh alasan yang jelas kenapa solusi ini layak dipilih sekarang.</p>
+        <div class="grid-2">
+          <div class="card">
+            <div class="icon-badge">!</div>
+            <h3>Masalah utama</h3>
+            <p>Target audiens {$audience} sering bingung memilih solusi yang benar-benar relevan, aman, dan terasa sepadan dengan biaya.</p>
+          </div>
+          <div class="card">
+            <div class="icon-badge">+</div>
+            <h3>Solusi yang ditawarkan</h3>
+            <p>{$product} dari {$company} disusun untuk memberi arah yang lebih jelas, proses yang lebih praktis, dan hasil yang lebih terukur.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Siapa yang Cocok Menggunakan {$product}</h2>
+        <div class="grid-3">
+          <div class="card"><div class="icon-badge">1</div><h3>Calon pembeli baru</h3><p>Cocok untuk yang ingin mulai dengan panduan yang lebih terarah dan tidak ingin trial and error terlalu lama.</p></div>
+          <div class="card"><div class="icon-badge">2</div><h3>Yang ingin hasil lebih cepat</h3><p>Pas untuk audiens yang butuh proses lebih ringkas, jelas, dan punya langkah yang mudah diikuti.</p></div>
+          <div class="card"><div class="icon-badge">3</div><h3>Pencari solusi praktis</h3><p>Ideal untuk yang mengutamakan manfaat nyata, komunikasi jelas, dan penawaran yang gampang dipahami.</p></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Benefit Utama</h2>
+        <div class="grid-2">
+          <div class="card"><div class="icon-badge">*</div><h3>Pesan lebih fokus</h3><p>Copy dan alur penawaran menonjolkan manfaat paling penting dari {$product}.</p></div>
+          <div class="card"><div class="icon-badge">*</div><h3>Lebih meyakinkan</h3><p>Setiap section dirancang untuk membangun kepercayaan sebelum calon pelanggan menekan CTA.</p></div>
+          <div class="card"><div class="icon-badge">*</div><h3>Siap follow up</h3><p>Form lead memudahkan kamu mengumpulkan data pengunjung yang tertarik.</p></div>
+          <div class="card"><div class="icon-badge">*</div><h3>Tampilan rapi</h3><p>Layout boxed, kartu konten, dan hierarchy visual dibuat aman untuk presentasi maupun iklan.</p></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Detail Program / Produk</h2>
+        <div class="card">
+          <p><strong>Nama brand:</strong> {$company}</p>
+          <p><strong>Produk:</strong> {$product}</p>
+          <p><strong>Audiens utama:</strong> {$audience}</p>
+          <p><strong>Fokus penawaran:</strong> {$offer}</p>
+          <p><strong>Catatan tambahan:</strong> {$toneLine}</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Paket dan Penawaran</h2>
+        <div class="card price-box">
+          <span class="old-price">Harga normal dapat berbeda tergantung kebutuhan</span>
+          <span class="new-price">{$price}</span>
+          <p style="margin-top:12px;color:var(--muted);">Bonus: {$bonus}</p>
+          <span class="note">{$urgency}</span>
+          <div class="cta-wrap">
+            <a href="#form-order" class="btn">{$cta}</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Apa Kata Mereka</h2>
+        <div class="grid-3">
+          <div class="card">
+            <p>"Penawarannya lebih mudah dipahami dan calon pelanggan jadi lebih cepat respon."</p>
+            <div class="testimonial-name">Rina, owner bisnis jasa</div>
+          </div>
+          <div class="card">
+            <p>"Struktur halamannya rapi, poin pentingnya jelas, dan CTA-nya terasa meyakinkan."</p>
+            <div class="testimonial-name">Fajar, marketer UMKM</div>
+          </div>
+          <div class="card">
+            <p>"Kami jadi punya halaman yang siap dipakai untuk promosi tanpa perlu nunggu lama."</p>
+            <div class="testimonial-name">Nadia, tim operasional</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">FAQ</h2>
+        <details class="faq-item" open>
+          <summary>Apa manfaat utama {$product}?</summary>
+          <div class="faq-answer">Manfaat utamanya adalah membantu audiens mendapatkan solusi yang lebih jelas, terarah, dan terasa sepadan dengan kebutuhan mereka.</div>
+        </details>
+        <details class="faq-item">
+          <summary>Apakah cocok untuk pemula?</summary>
+          <div class="faq-answer">Ya. Struktur informasi dan penawarannya dibuat agar mudah dipahami bahkan oleh calon pelanggan yang baru mengenal produk ini.</div>
+        </details>
+        <details class="faq-item">
+          <summary>Bagaimana dengan bonus atau promo?</summary>
+          <div class="faq-answer">Bonus dan promo bisa langsung ditonjolkan pada section penawaran agar alasan membeli terasa lebih kuat.</div>
+        </details>
+        <details class="faq-item">
+          <summary>Apakah tampilannya aman di mobile?</summary>
+          <div class="faq-answer">Ya. Layout fallback ini dibuat boxed dan responsive supaya tetap rapi di layar HP maupun desktop.</div>
+        </details>
+        <details class="faq-item">
+          <summary>Bagaimana cara lanjut konsultasi?</summary>
+          <div class="faq-answer">Pengunjung bisa isi form di bawah atau langsung menghubungi kontak yang tersedia di bagian footer.</div>
+        </details>
+      </section>
+
+      <section class="section" id="form-order">
+        <h2 class="section-title">Siap Ambil Penawaran Ini?</h2>
+        <p class="section-intro">Isi data singkat berikut supaya tim {$company} bisa bantu proses lebih lanjut.</p>
+        <form class="form-stack">
+          <label>Nama Lengkap<input type="text" placeholder="Nama kamu" /></label>
+          <label>No WhatsApp<input type="text" placeholder="08xxxxxxxxxx" /></label>
+          <label>Kebutuhan<textarea placeholder="Ceritakan kebutuhan singkat kamu"></textarea></label>
+          <div class="cta-wrap">
+            <button type="button" class="btn">{$cta}</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="section footer">
+        <h2 class="section-title footer-cta">{$company}</h2>
+        <p>{$product} untuk {$audience}</p>
+        <p style="margin-top:10px;">Kontak: {$contact}</p>
+        <p style="margin-top:10px;">Disclaimer: halaman ini disiapkan otomatis sebagai fallback saat layanan AI sedang padat, namun tetap siap dipakai sebagai draft promosi.</p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
+HTML;
     }
 
     private function buildCompanyProfileFallbackHtml(array $d): string
@@ -425,35 +862,54 @@ HTML;
         $last = null;
 
         foreach ($models as $idx => $model) {
-            try {
-                if ($idx > 0) {
-                    Log::warning('Gemini fallback model used', [
-                        'from' => $preferredModel,
-                        'to' => $model,
-                    ]);
-                }
-
-                return $this->callGeminiHtml($prompt, $apiKey, $model);
-            } catch (ValidationException $e) {
-                $last = $e;
-                $msg = $this->extractValidationMessage($e);
-
-                Log::warning('Gemini generate failed', [
-                    'model' => $model,
-                    'message' => $msg,
+            if ($idx > 0) {
+                Log::warning('Gemini fallback model used', [
+                    'from' => $preferredModel,
+                    'to' => $model,
                 ]);
+            }
 
-                if (str_contains(strtolower($msg), 'limit: 0, model:')) {
-                    throw ValidationException::withMessages([
-                        'ai' => [
-                            "Model {$model} belum punya kuota di project API key ini (limit: 0). " .
-                            "Pakai model lain yang tersedia atau set billing/kuota di Google AI Studio."
-                        ],
+            $maxAttempts = (int) env('GEMINI_RETRYABLE_ATTEMPTS', 2);
+            $maxAttempts = max(1, min($maxAttempts, 3));
+            $baseDelayMs = (int) env('GEMINI_RETRY_DELAY_MS', 1800);
+            $baseDelayMs = max(500, min($baseDelayMs, 6000));
+
+            for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+                try {
+                    return $this->callGeminiHtml($prompt, $apiKey, $model);
+                } catch (ValidationException $e) {
+                    $last = $e;
+                    $msg = $this->extractValidationMessage($e);
+
+                    Log::warning('Gemini generate failed', [
+                        'model' => $model,
+                        'attempt' => $attempt,
+                        'message' => $msg,
                     ]);
-                }
 
-                if ($idx === count($models) - 1 || !$this->isRetryableAiError($msg)) {
-                    throw $e;
+                    if (str_contains(strtolower($msg), 'limit: 0, model:')) {
+                        throw ValidationException::withMessages([
+                            'ai' => [
+                                "Model {$model} belum punya kuota di project API key ini (limit: 0). " .
+                                "Pakai model lain yang tersedia atau set billing/kuota di Google AI Studio."
+                            ],
+                        ]);
+                    }
+
+                    $shouldRetrySameModel = $attempt < $maxAttempts
+                        && $this->isRetryableAiError($msg)
+                        && $this->isTemporaryHighDemandError($msg);
+
+                    if ($shouldRetrySameModel) {
+                        usleep($baseDelayMs * $attempt * 1000);
+                        continue;
+                    }
+
+                    if ($idx === count($models) - 1 || !$this->isRetryableAiError($msg)) {
+                        throw $e;
+                    }
+
+                    break;
                 }
             }
         }
@@ -477,6 +933,29 @@ HTML;
         return (string) $e->getMessage();
     }
 
+    private function shouldServeFallbackHtml(string $message): bool
+    {
+        if (!$this->isFallbackEnabled()) {
+            return false;
+        }
+
+        $text = strtolower($message);
+
+        return $this->isRetryableAiError($message)
+            || str_contains($text, 'quota exceeded')
+            || str_contains($text, 'exceeded your current quota')
+            || str_contains($text, 'retry in')
+            || str_contains($text, 'high demand')
+            || str_contains($text, 'try again later');
+    }
+
+    private function isFallbackEnabled(): bool
+    {
+        $value = strtolower(trim((string) env('AI_FALLBACK_ENABLED', 'true')));
+
+        return !in_array($value, ['0', 'false', 'off', 'no'], true);
+    }
+
     private function isRetryableAiError(string $message): bool
     {
         $text = strtolower($message);
@@ -485,8 +964,23 @@ HTML;
             || str_contains($text, 'terputus')
             || str_contains($text, 'too many requests')
             || str_contains($text, 'resource exhausted')
+            || str_contains($text, 'high demand')
+            || str_contains($text, 'try again later')
             || str_contains($text, 'http 429')
             || str_contains($text, 'http 500')
+            || str_contains($text, 'http 503');
+    }
+
+    private function isTemporaryHighDemandError(string $message): bool
+    {
+        $text = strtolower($message);
+
+        return str_contains($text, 'high demand')
+            || str_contains($text, 'spikes in demand')
+            || str_contains($text, 'try again later')
+            || str_contains($text, 'resource exhausted')
+            || str_contains($text, 'too many requests')
+            || str_contains($text, 'http 429')
             || str_contains($text, 'http 503');
     }
 
@@ -494,74 +988,45 @@ HTML;
     {
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
-        $full = '';
-        // Balance between quota usage and completeness for long prompts.
-        $maxTurns = max(1, min((int) env('GEMINI_MAX_TURNS', 4), 5));
-        $startedAt = microtime(true);
-        $hardDeadlineSeconds = (float) env('GEMINI_HARD_DEADLINE_SECONDS', 150);
-        $hardDeadlineSeconds = max(40, min($hardDeadlineSeconds, 540));
+        $timeoutSeconds = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 40);
+        $timeoutSeconds = max(12, min($timeoutSeconds, 90));
+        $maxOutputTokens = (int) env('GEMINI_MAX_OUTPUT_TOKENS', 3600);
+        $maxOutputTokens = max(1200, min($maxOutputTokens, 8192));
 
-        $contents = [
-            ['role' => 'user', 'parts' => [['text' => $prompt]]],
-        ];
-
-        for ($i = 0; $i < $maxTurns; $i++) {
-            $elapsed = microtime(true) - $startedAt;
-            $remaining = $hardDeadlineSeconds - $elapsed;
-            if ($remaining <= 10) {
-                break;
-            }
-
-            $baseTurnTimeout = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 40);
-            $baseTurnTimeout = max(12, min($baseTurnTimeout, 90));
-            $timeoutSeconds = (int) max(12, min($baseTurnTimeout, floor($remaining - 4)));
-            $maxOutputTokens = (int) env('GEMINI_MAX_OUTPUT_TOKENS', 3600);
-            $maxOutputTokens = max(1200, min($maxOutputTokens, 8192));
-
-            try {
-                /** @var Response $resp */
-                $resp = Http::connectTimeout(15)
-                    ->timeout($timeoutSeconds)
-                    ->retry(0, 0)
-                    ->acceptJson()
-                    ->asJson()
-                    ->post($url . '?key=' . $apiKey, [
-                        'contents' => $contents,
-                        'generationConfig' => [
-                            'temperature' => 0.45,
-                            'maxOutputTokens' => $maxOutputTokens,
-                        ],
-                    ]);
-            } catch (ConnectionException $e) {
-                throw ValidationException::withMessages([
-                    'ai' => ['Koneksi ke Gemini timeout/terputus. Coba lagi, atau ringkas input agar proses lebih cepat.'],
+        try {
+            /** @var Response $resp */
+            $resp = Http::connectTimeout(15)
+                ->timeout($timeoutSeconds)
+                ->retry(0, 0)
+                ->acceptJson()
+                ->asJson()
+                ->post($url . '?key=' . $apiKey, [
+                    'contents' => [
+                        ['role' => 'user', 'parts' => [['text' => $prompt]]],
+                    ],
+                    'generationConfig' => [
+                        'temperature' => 0.45,
+                        'maxOutputTokens' => $maxOutputTokens,
+                    ],
                 ]);
-            }
-
-            if (!$resp instanceof Response) {
-                throw ValidationException::withMessages([
-                    'ai' => ['Respons dari layanan AI tidak valid. Coba lagi sebentar.'],
-                ]);
-            }
-
-            if ($resp->failed()) {
-                $msg = data_get($resp->json(), 'error.message') ?? ('HTTP ' . $resp->status());
-                throw ValidationException::withMessages(['ai' => ["Gagal generate: {$msg}"]]);
-            }
-
-            $chunk = $this->extractTextFromGeminiResponse($resp);
-            $full .= $chunk;
-
-            if (str_contains($full, '<!-- END -->') || preg_match('/<\/html>/i', $full)) {
-                break;
-            }
-
-            $contents[] = ['role' => 'model', 'parts' => [['text' => $chunk]]];
-            $contents[] = ['role' => 'user', 'parts' => [[
-                'text' => 'Lanjutkan tepat dari posisi terakhir. Jangan ulangi konten sebelumnya. Prioritaskan menyelesaikan sisa HTML dan akhiri dengan <!-- END -->.'
-            ]]];
+        } catch (ConnectionException $e) {
+            throw ValidationException::withMessages([
+                'ai' => ['Koneksi ke Gemini timeout/terputus. Coba lagi, atau ringkas input agar proses lebih cepat.'],
+            ]);
         }
 
+        if (!$resp instanceof Response) {
+            throw ValidationException::withMessages([
+                'ai' => ['Respons dari layanan AI tidak valid. Coba lagi sebentar.'],
+            ]);
+        }
+
+        if ($resp->failed()) {
+            $msg = data_get($resp->json(), 'error.message') ?? ('HTTP ' . $resp->status());
+            throw ValidationException::withMessages(['ai' => ["Gagal generate: {$msg}"]]);
+        }
+
+        $full = $this->extractTextFromGeminiResponse($resp);
         $full = str_replace('<!-- END -->', '', $full);
         $full = trim($full);
 
@@ -572,22 +1037,36 @@ HTML;
         }
 
         if (!$this->looksLikeCompleteHtml($full)) {
-            $continued = $this->continueIncompleteHtml($full, $apiKey, $model, $url);
-            if ($this->looksLikeCompleteHtml($continued)) {
-                return $continued;
+            $bestEffort = $full;
+
+            if ($this->shouldAttemptIncompleteRecovery($bestEffort)) {
+                $continued = $this->continueIncompleteHtml($bestEffort, $apiKey, $model, $url);
+                if ($this->looksLikeCompleteHtml($continued)) {
+                    return $continued;
+                }
+
+                if (strlen($continued) > strlen($bestEffort)) {
+                    $bestEffort = $continued;
+                }
             }
 
-            $repaired = $this->repairIncompleteHtml($full, $apiKey, $url);
-            if ($this->looksLikeCompleteHtml($repaired)) {
-                return $repaired;
+            if ($this->shouldAttemptIncompleteRecovery($bestEffort)) {
+                $repaired = $this->repairIncompleteHtml($bestEffort, $apiKey, $url);
+                if ($this->looksLikeCompleteHtml($repaired)) {
+                    return $repaired;
+                }
+
+                if (strlen($repaired) > strlen($bestEffort)) {
+                    $bestEffort = $repaired;
+                }
             }
 
-            $finalized = $this->finalizeHtmlBestEffort($repaired);
+            $finalized = $this->finalizeHtmlBestEffort($bestEffort);
             if ($this->looksLikeCompleteHtml($finalized)) {
                 return $finalized;
             }
 
-            $wrapped = $this->forceHtmlWrapper($finalized !== '' ? $finalized : $repaired);
+            $wrapped = $this->forceHtmlWrapper($finalized !== '' ? $finalized : $bestEffort);
             if ($this->looksLikeCompleteHtml($wrapped)) {
                 return $wrapped;
             }
@@ -710,6 +1189,30 @@ PROMPT;
         return trim($full);
     }
 
+    private function shouldAttemptIncompleteRecovery(string $html): bool
+    {
+        $trimmed = trim(str_replace('<!-- END -->', '', $html));
+        if ($trimmed === '') {
+            return false;
+        }
+
+        $minChars = (int) env('GEMINI_RECOVERY_MIN_CHARS', 1800);
+        $minChars = max(600, min($minChars, 6000));
+
+        if (strlen($trimmed) < $minChars) {
+            return false;
+        }
+
+        $signals = 0;
+        $signals += preg_match('/<!doctype html>/i', $trimmed) === 1 ? 1 : 0;
+        $signals += preg_match('/<html\b/i', $trimmed) === 1 ? 1 : 0;
+        $signals += preg_match('/<body\b/i', $trimmed) === 1 ? 1 : 0;
+        $signals += preg_match('/<style\b/i', $trimmed) === 1 ? 1 : 0;
+        $signals += preg_match('/<(main|section|header|footer)\b/i', $trimmed) === 1 ? 1 : 0;
+
+        return $signals >= 2;
+    }
+
     private function finalizeHtmlBestEffort(string $html): string
     {
         $out = trim(str_replace('<!-- END -->', '', $html));
@@ -804,69 +1307,52 @@ PROMPT;
         $color   = $d['brand_color'] ?? '';
 
         return <<<PROMPT
-Kamu adalah senior web developer + direct response copywriter. Buat 1 file landing page HTML yang rapi, modern, dan fokus konversi penjualan produk.
+Kamu adalah senior web developer + direct response copywriter. Buat 1 file landing page HTML yang modern, rapi, dan fokus konversi penjualan produk.
 
 ATURAN OUTPUT:
-- Output HARUS HANYA HTML (mulai dari <!doctype html>), tanpa markdown, tanpa penjelasan.
-- Semua CSS ditulis di <style> (tidak boleh link CDN).
-- Layout WAJIB boxed seperti referensi: ada background luar abu-abu, lalu 1 kolom utama putih di tengah.
-- Lebar kolom utama desktop wajib dibatasi (gunakan max-width sekitar 760px-860px), center (`margin: 0 auto`), bukan full-width.
-- Di mobile tetap full lebar layar HP (padding secukupnya), tapi di tablet/desktop tetap kolom tengah.
-- Semua section konten harus berada di dalam kolom tengah tersebut.
-- Wajib pakai fondasi CSS yang rapi dan lengkap (tidak boleh setengah):
-  - CSS reset minimal: `*{box-sizing:border-box}` + reset margin default elemen utama.
-  - Definisikan variabel warna di `:root` (primary, accent, text, muted, bg, surface, border).
-  - Definisikan style global untuk `body`, `h1-h4`, `p`, `img`, `a`, `button`, `input`, `textarea`.
-  - Semua elemen form harus fully styled (jangan ada style default browser yang polos).
-  - Semua tombol CTA harus konsisten (radius, padding, warna, shadow, hover) dan center menggunakan wrapper (`.cta-wrap {text-align:center}`).
-  - WAJIB pastikan kontras tombol aman: warna teks tombol dan background tombol tidak boleh sama/terlalu mirip pada state normal, hover, dan focus.
-  - Definisikan token khusus tombol (`--btn-bg`, `--btn-text`, `--btn-hover-bg`, `--btn-hover-text`) lalu pakai konsisten di semua tombol.
-  - Form field harus tersusun vertikal rapi, label di atas input, jarak antar field konsisten.
-  - Card/testimoni/faq harus punya padding, border/radius, dan background yang konsisten.
-  - Gunakan layout grid/flex yang aman agar tidak overflow horizontal.
-- Aturan visual media:
-  - Untuk section fitur/benefit/card seperti referensi, JANGAN gunakan `<img>`.
-  - Gunakan icon saja (inline SVG atau karakter icon/emoji) di dalam elemen `.icon-badge` agar pasti tampil.
-  - Icon harus konsisten ukuran (mis. 28px-40px), center, dan punya background badge yang rapi.
-  - Jika perlu hero visual, tetap prioritaskan ilustrasi CSS/SVG inline, bukan gambar link eksternal.
-- Aturan FAQ WAJIB stabil:
-  - Gunakan struktur semantik `<details class="faq-item"><summary>...</summary><div class="faq-answer">...</div></details>`.
-  - `summary` wajib full-width, rapi, tanpa border aneh, cursor pointer, ikon +/- konsisten.
-  - Style state terbuka (`details[open]`) harus jelas; jawaban punya padding dan line-height nyaman.
-  - Tidak boleh ada teks/ikon FAQ yang keluar container di mobile.
-- Gaya visual dan ritme konten harus mirip landing page sales "scalev style": headline kuat, blok offer jelas, CTA berulang, trust section, dan struktur meyakinkan untuk closing.
-- JANGAN meniru brand/salin teks referensi mentah. Buat desain + copy orisinal namun nuansanya sekelas landing page referensi.
-- Gunakan pola copywriting khas referensi: ada label promo di atas hero, narasi masalah audiens, bagian "siapa yang cocok", bonus eksklusif, harga coret vs harga promo, lalu FAQ dan CTA penutup.
-- Wajib ada section ini:
-  1) Hero dengan label promo, headline penawaran, subheadline, CTA utama, mini trust badge
-  2) Problem -> Solution (pain points target audiens + solusi produk)
-  3) Siapa yang cocok untuk produk ini (minimal 3 persona)
-  4) Benefit list (minimal 4 poin)
-  5) Detail produk/program
-  6) Paket/harga + promo/urgency + bonus (jika data tersedia)
-  7) Testimoni sosial proof (minimal 3 testimoni realistis)
-  8) FAQ (minimal 5 pertanyaan)
-  9) Form lead/order bernuansa jualan (field: nama, no whatsapp, kebutuhan; tombol submit pakai CTA)
-  10) Footer berisi kontak dan disclaimer ringkas
-- Tampilkan CTA button dengan teks: "{$cta}".
-- Bahasa Indonesia, tone: {$tone}.
-- Jika ada contact, tampilkan di bagian footer.
-- Wajib responsive di desktop dan mobile.
+- Output HARUS HANYA HTML lengkap mulai dari `<!doctype html>`, tanpa markdown atau penjelasan.
+- Semua CSS wajib di dalam `<style>`, tanpa CDN/framework eksternal.
+- Layout wajib boxed seperti sales page premium: background luar abu-abu, 1 kolom utama putih di tengah, seluruh section berada di kolom ini.
+- Di desktop/tablet gunakan `max-width` sekitar 760px-860px dan center; di mobile tetap nyaman penuh dengan padding aman.
+- Wajib ada fondasi CSS yang lengkap: `*{box-sizing:border-box}`, variabel warna di `:root`, style global `body`, heading, paragraph, link, button, input, textarea, card, dan layout grid/flex yang tidak overflow horizontal.
+- Semua elemen form dan tombol harus fully styled, bukan style default browser.
+- Gunakan token tombol `--btn-bg`, `--btn-text`, `--btn-hover-bg`, `--btn-hover-text`, dan pastikan kontras tombol aman pada state normal, hover, dan focus.
+- CTA harus konsisten, terasa premium, dan center secara visual.
+- Untuk section fitur/benefit/card, jangan gunakan `<img>`; gunakan icon saja (inline SVG, emoji, atau karakter) di badge yang rapi dan konsisten.
+- Jika butuh visual hero, prioritaskan ilustrasi CSS/SVG inline, bukan gambar eksternal.
+- FAQ wajib pakai struktur ini: `<details class="faq-item"><summary>...</summary><div class="faq-answer">...</div></details>` dengan state terbuka yang jelas, rapi, dan aman di mobile.
+- Nuansa visual harus seperti landing page sales yang meyakinkan: headline kuat, offer jelas, CTA berulang, trust section, ritme konten rapat, dan copy yang menjual.
+- Jangan meniru brand atau menyalin referensi mentah; buat desain dan copy orisinal dengan rasa yang setara.
 - Jangan buat navbar, top menu, atau hamburger menu.
-- Gunakan copy yang terasa menjual produk, bukan sekadar company profile.
-- Sisipkan elemen urgency yang natural (contoh kuota, periode promo, atau bonus terbatas) tanpa terkesan menakut-nakuti.
-- Hindari komponen yang melebar 100vw. Prioritaskan komposisi rapat dan fokus seperti sales letter column.
-- Checklist WAJIB sebelum menulis <!-- END -->:
-  1) Tidak ada elemen input/button/textarea yang tampil default browser.
-  2) Semua CTA button terlihat center secara visual.
-  3) Kontras warna tombol aman di semua state (normal/hover/focus) dan tetap terbaca.
-  4) Untuk fitur/benefit, hanya gunakan icon (tanpa `<img>`), dan icon tampil normal.
-  5) FAQ berfungsi dan tampil rapi (tertutup/terbuka) di mobile + desktop.
-  6) Tidak ada teks keluar container atau terpotong di mobile.
-  7) Struktur section lengkap dan jarak antar section konsisten.
-- WAJIB akhiri output dengan string persis: <!-- END -->
-- Jangan berhenti sebelum menulis <!-- END -->.
+- Jangan membuat komponen melebar 100vw.
+- Wajib responsive di desktop dan mobile.
 
+SECTION WAJIB:
+1) Hero dengan label promo, headline penawaran, subheadline, CTA utama, mini trust badge.
+2) Problem -> Solution yang membahas pain point audiens dan solusi produk.
+3) Siapa yang cocok untuk produk ini, minimal 3 persona.
+4) Benefit list, minimal 4 poin.
+5) Detail produk/program.
+6) Paket/harga + promo/urgency + bonus bila data tersedia.
+7) Testimoni atau social proof, minimal 3 testimoni realistis.
+8) FAQ, minimal 5 pertanyaan.
+9) Form lead/order bernuansa jualan dengan field nama, no whatsapp, kebutuhan, dan tombol CTA "{$cta}".
+10) Footer berisi kontak dan disclaimer ringkas.
+
+ARAH COPY:
+- Bahasa Indonesia dengan tone: {$tone}.
+- Gunakan pola copy sales page: label promo di hero, narasi masalah audiens, bagian siapa yang cocok, bonus eksklusif, harga coret vs harga promo bila relevan, FAQ, dan CTA penutup.
+- Copy harus terasa menjual produk, bukan company profile.
+- Sisipkan urgency yang natural seperti kuota, periode promo, atau bonus terbatas tanpa terkesan menakut-nakuti.
+- Jika contact tersedia, tampilkan di footer.
+
+CHECKLIST AKHIR:
+- Tidak ada input, button, atau textarea yang tampil default browser.
+- Semua CTA terlihat center dan terbaca jelas.
+- Fitur/benefit hanya memakai icon, bukan `<img>`.
+- FAQ tampil rapi dan berfungsi di mobile maupun desktop.
+- Tidak ada teks yang keluar container atau terpotong di mobile.
+- Struktur section lengkap, spacing konsisten, dan akhiri output dengan string persis `<!-- END -->`.
 
 DATA:
 - Nama perusahaan: {$company}
@@ -879,7 +1365,7 @@ DATA:
 - Warna brand (opsional): {$color}
 - Contact (opsional): {$contact}
 
-Buat konten yang masuk akal dan tidak ada placeholder seperti "lorem ipsum".
+Buat hasil yang siap pakai, masuk akal, tanpa placeholder seperti "lorem ipsum", dan jangan berhenti sebelum menulis `<!-- END -->`.
 PROMPT;
     }
 

@@ -5,12 +5,16 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LandingGenerateController extends Controller
 {
+    private const GENERATE_CACHE_VERSION = 'v16';
+    private const MODEL_COOLDOWN_CACHE_PREFIX = 'gemini_model_cooldown:';
+
     public function generate(Request $request)
     {
         $this->applyExecutionLimits();
@@ -27,7 +31,10 @@ class LandingGenerateController extends Controller
             'cta'          => 'required|string|max:60',
             'contact'      => 'nullable|string|max:200',
             'brand_color'  => 'nullable|string|max:40',
+            'force_refresh'=> 'nullable|boolean',
         ]);
+        $forceRefresh = (bool) ($data['force_refresh'] ?? false);
+        unset($data['force_refresh']);
 
         $apiKey = (string) config('services.gemini.key');
         $model  = (string) config('services.gemini.model', 'gemini-2.0-flash');
@@ -40,11 +47,30 @@ class LandingGenerateController extends Controller
         }
 
         $prompt = $this->buildPrompt($data);
+        $cacheKey = $this->makeGenerateCacheKey('landing', $data, $model);
+
+        if (!$forceRefresh && ($cachedResponse = $this->getCachedGenerateResponse($cacheKey))) {
+            return response()->json($cachedResponse);
+        }
+
+        $origin = 'ai';
+        $notice = null;
 
         try {
-            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
+            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel, true, 'landing');
         } catch (ValidationException $e) {
-            throw $e;
+            $message = $this->extractValidationMessage($e);
+            if ($this->shouldUseLandingFallback($message)) {
+                Log::warning('Landing fallback used', [
+                    'message' => $message,
+                    'company' => $data['company_name'] ?? null,
+                ]);
+                $origin = 'fallback';
+                $notice = $this->buildFallbackNotice('landing page', $message);
+                $html = $this->buildLandingFallbackHtml($data);
+            } else {
+                throw $e;
+            }
         } catch (\Throwable $e) {
             Log::error('Generate landing failed', [
                 'error' => $e->getMessage(),
@@ -55,9 +81,15 @@ class LandingGenerateController extends Controller
             ]);
         }
 
-        return response()->json([
-            'html' => $html,
-        ]);
+        $this->putGenerateCacheResponse($cacheKey, $html, $origin);
+
+        return response()->json($this->makeGenerateResponse(
+            html: $html,
+            cached: false,
+            source: $origin,
+            origin: $origin,
+            notice: $notice
+        ));
     }
 
     public function generateCompanyProfile(Request $request)
@@ -84,7 +116,10 @@ class LandingGenerateController extends Controller
             'cta'                => 'required|string|max:80',
             'tone'               => 'required|string|in:profesional,santai,formal',
             'brand_color'        => 'nullable|string|max:40',
+            'force_refresh'      => 'nullable|boolean',
         ]);
+        $forceRefresh = (bool) ($data['force_refresh'] ?? false);
+        unset($data['force_refresh']);
 
         $apiKey = (string) config('services.gemini.key');
         $model  = (string) config('services.gemini.model', 'gemini-2.0-flash');
@@ -96,12 +131,32 @@ class LandingGenerateController extends Controller
             ]);
         }
 
+        $cacheKey = $this->makeGenerateCacheKey('company', $data, $model);
+
+        if (!$forceRefresh && ($cachedResponse = $this->getCachedGenerateResponse($cacheKey))) {
+            return response()->json($cachedResponse);
+        }
+
+        $origin = 'ai';
+        $notice = null;
+
         $prompt = $this->buildCompanyProfilePrompt($data);
 
         try {
-            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel);
+            $html = $this->callGeminiHtmlWithFallback($prompt, $apiKey, $model, $fallbackModel, false, 'company');
         } catch (ValidationException $e) {
-            throw $e;
+            $message = $this->extractValidationMessage($e);
+            if ($this->shouldUseCompanyProfileFallback($message)) {
+                Log::warning('Company profile fallback used', [
+                    'message' => $message,
+                    'company' => $data['company_name'] ?? null,
+                ]);
+                $origin = 'fallback';
+                $notice = $this->buildFallbackNotice('company profile', $message);
+                $html = $this->buildCompanyProfileFallbackHtml($data);
+            } else {
+                throw $e;
+            }
         } catch (\Throwable $e) {
             Log::error('Generate company profile failed', [
                 'error' => $e->getMessage(),
@@ -112,9 +167,15 @@ class LandingGenerateController extends Controller
             ]);
         }
 
-        return response()->json([
-            'html' => $html,
-        ]);
+        $this->putGenerateCacheResponse($cacheKey, $html, $origin);
+
+        return response()->json($this->makeGenerateResponse(
+            html: $html,
+            cached: false,
+            source: $origin,
+            origin: $origin,
+            notice: $notice
+        ));
     }
 
     private function applyExecutionLimits(): void
@@ -125,8 +186,337 @@ class LandingGenerateController extends Controller
         @set_time_limit($seconds);
     }
 
+    private function makeGenerateCacheKey(string $type, array $data, string $model): string
+    {
+        ksort($data);
+
+        return 'gemini_generate:' . self::GENERATE_CACHE_VERSION . ':' . $type . ':' . $model . ':' . sha1(json_encode($data));
+    }
+
+    private function getCachedGenerateResponse(string $cacheKey): ?array
+    {
+        $cached = Cache::get($cacheKey);
+
+        if (is_string($cached) && trim($cached) !== '') {
+            return $this->makeGenerateResponse(
+                html: $cached,
+                cached: true,
+                source: 'cache',
+                origin: 'ai',
+                notice: $this->buildCacheNotice('ai')
+            );
+        }
+
+        if (!is_array($cached) || !isset($cached['html'])) {
+            return null;
+        }
+
+        $html = trim((string) ($cached['html'] ?? ''));
+        if ($html === '') {
+            return null;
+        }
+
+        $origin = (string) ($cached['origin'] ?? 'ai');
+
+        return $this->makeGenerateResponse(
+            html: $html,
+            cached: true,
+            source: 'cache',
+            origin: $origin,
+            notice: $this->buildCacheNotice($origin)
+        );
+    }
+
+    private function putGenerateCacheResponse(string $cacheKey, string $html, string $origin): void
+    {
+        Cache::put($cacheKey, [
+            'html' => $html,
+            'origin' => $origin,
+            'created_at' => now()->toIso8601String(),
+        ], now()->addHours(12));
+    }
+
+    private function makeGenerateResponse(
+        string $html,
+        bool $cached,
+        string $source,
+        string $origin,
+        ?string $notice = null
+    ): array {
+        return [
+            'html' => $html,
+            'cached' => $cached,
+            'source' => $source,
+            'origin' => $origin,
+            'notice' => $notice,
+        ];
+    }
+
+    private function buildCacheNotice(string $origin): string
+    {
+        if ($origin === 'fallback') {
+            return 'Menampilkan hasil fallback yang sudah tersimpan agar aplikasi tetap stabil saat Gemini sedang bermasalah.';
+        }
+
+        return 'Menampilkan hasil generate yang sudah tersimpan agar lebih hemat kuota API.';
+    }
+
+    private function buildFallbackNotice(string $documentType, string $message): string
+    {
+        return sprintf(
+            'Menggunakan template fallback %s karena %s.',
+            $documentType,
+            $this->summarizeFallbackReason($message)
+        );
+    }
+
+    private function buildLandingFallbackHtml(array $d): string
+    {
+        $seed = (string) (($d['company_name'] ?? '') . '|' . ($d['product'] ?? ''));
+        $variant = $this->pickFallbackVariant($seed, 3);
+        $theme = $this->pickFallbackTheme();
+
+        return match ($variant) {
+            1 => $this->renderLandingFallbackTemplateScalevStyle($d, $theme),
+            2 => $this->renderLandingFallbackTemplateEditorialStyle($d, $theme),
+            default => $this->renderLandingFallbackTemplateStoryStyle($d, $theme),
+        };
+
+        $theme = $this->pickFallbackTheme();
+        $company = $this->e($d['company_name'] ?? 'Brand Anda');
+        $product = $this->e($d['product'] ?? 'Produk unggulan');
+        $audience = $this->e($d['audience'] ?? 'Audiens yang tepat');
+        $offer = $this->e($d['main_offer'] ?? "Solusi praktis untuk {$audience}");
+        $price = $this->e($d['price_note'] ?? 'Penawaran spesial tersedia hari ini.');
+        $bonus = $this->e($d['bonus'] ?? 'Bonus panduan dan pendampingan singkat.');
+        $urgency = $this->e($d['urgency'] ?? 'Slot promo terbatas untuk batch saat ini.');
+        $cta = $this->e($d['cta'] ?? 'Daftar Sekarang');
+        $contact = $this->e($d['contact'] ?? 'Hubungi kami untuk info lebih lanjut.');
+        $brandColor = $this->normalizeColor($d['brand_color'] ?? $theme['primary']);
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$company} - {$product}</title>
+  <style>
+    :root {
+      --primary: {$brandColor};
+      --accent: #facc15;
+      --text: #0f172a;
+      --muted: #475569;
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --btn-bg: {$brandColor};
+      --btn-text: #ffffff;
+      --btn-hover-bg: #0f172a;
+      --btn-hover-text: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: linear-gradient(180deg, #eef4ff 0%, var(--bg) 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .page {
+      width: min(820px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 52px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 24px;
+      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08);
+      margin-bottom: 18px;
+    }
+    .promo {
+      display: inline-block;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: #fef08a;
+      color: #854d0e;
+      font-weight: 700;
+      font-size: 13px;
+      margin-bottom: 14px;
+    }
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.2; }
+    h1 { font-size: clamp(2rem, 4vw, 3.2rem); }
+    h2 { font-size: 1.4rem; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    .cta-wrap { text-align: center; margin-top: 22px; }
+    .button {
+      display: inline-block;
+      text-decoration: none;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      padding: 14px 24px;
+      border-radius: 14px;
+      font-weight: 700;
+      box-shadow: 0 10px 24px rgba(20, 86, 217, 0.22);
+    }
+    .button:hover { background: var(--btn-hover-bg); color: var(--btn-hover-text); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .feature {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      background: #f8fbff;
+    }
+    .price-box {
+      border: 1px solid rgba(20, 86, 217, 0.16);
+      background: linear-gradient(180deg, #ffffff 0%, #eff6ff 100%);
+    }
+    .price-note { font-size: 1.1rem; font-weight: 700; color: var(--primary); }
+    .form-box {
+      display: grid;
+      gap: 12px;
+    }
+    label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    input, textarea, button {
+      width: 100%;
+      font: inherit;
+      border-radius: 12px;
+    }
+    input, textarea {
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      background: #fff;
+      color: var(--text);
+    }
+    textarea { min-height: 120px; resize: vertical; }
+    button {
+      border: 0;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      padding: 14px;
+      font-weight: 700;
+    }
+    .faq-item {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      background: #fff;
+      margin-bottom: 10px;
+    }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      padding-top: 8px;
+    }
+    @media (max-width: 720px) {
+      .page { width: min(100% - 20px, 820px); }
+      .card { padding: 18px; border-radius: 18px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="card">
+      <span class="promo">PROMO TERBATAS</span>
+      <h1>{$offer}</h1>
+      <p><strong>{$company}</strong> menghadirkan {$product} untuk {$audience} dengan pendekatan yang lebih mudah dipahami, praktis, dan terarah.</p>
+      <p>{$urgency}</p>
+      <div class="cta-wrap">
+        <a class="button" href="#form-order">{$cta}</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Kenapa Penawaran Ini Menarik?</h2>
+      <div class="grid">
+        <div class="feature">
+          <h3>Lebih Tepat Sasaran</h3>
+          <p>Dirancang khusus untuk {$audience} dengan pesan yang fokus ke manfaat utama.</p>
+        </div>
+        <div class="feature">
+          <h3>Lebih Mudah Dipahami</h3>
+          <p>Konten disusun singkat, jelas, dan membantu calon pelanggan mengambil keputusan lebih cepat.</p>
+        </div>
+        <div class="feature">
+          <h3>Nilai Tambah Nyata</h3>
+          <p>{$bonus}</p>
+        </div>
+        <div class="feature">
+          <h3>Siap Dipakai</h3>
+          <p>Struktur halaman sudah lengkap untuk promosi, penjelasan offer, dan CTA penutup.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card price-box">
+      <h2>Detail Penawaran</h2>
+      <p>{$product}</p>
+      <p class="price-note">{$price}</p>
+      <p>{$urgency}</p>
+      <div class="cta-wrap">
+        <a class="button" href="#form-order">{$cta}</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>FAQ Singkat</h2>
+      <div class="faq-item"><strong>Apakah produk ini cocok untuk saya?</strong><p>Jika kamu termasuk {$audience}, halaman ini memang dirancang untuk kebutuhanmu.</p></div>
+      <div class="faq-item"><strong>Apa manfaat utamanya?</strong><p>Fokus utama halaman ini adalah menyampaikan manfaat inti dari {$product} secara singkat namun meyakinkan.</p></div>
+      <div class="faq-item"><strong>Apakah ada bonus?</strong><p>{$bonus}</p></div>
+      <div class="faq-item"><strong>Apakah promo ini terbatas?</strong><p>{$urgency}</p></div>
+      <div class="faq-item"><strong>Bagaimana cara menghubungi tim?</strong><p>{$contact}</p></div>
+    </section>
+
+    <section id="form-order" class="card">
+      <h2>Ambil Penawaran Sekarang</h2>
+      <p>Isi form singkat berikut agar tim {$company} bisa menghubungi kamu lebih cepat.</p>
+      <div class="form-box">
+        <div>
+          <label>Nama</label>
+          <input type="text" placeholder="Nama lengkap" />
+        </div>
+        <div>
+          <label>No. WhatsApp</label>
+          <input type="text" placeholder="08xxxxxxxxxx" />
+        </div>
+        <div>
+          <label>Kebutuhan</label>
+          <textarea placeholder="Ceritakan kebutuhan kamu secara singkat"></textarea>
+        </div>
+        <button type="button">{$cta}</button>
+      </div>
+    </section>
+
+    <footer>
+      <p>{$company} &bull; {$contact}</p>
+      <p>&copy; 2026 {$company}. All rights reserved.</p>
+    </footer>
+  </main>
+</body>
+</html>
+HTML;
+    }
+
     private function buildCompanyProfileFallbackHtml(array $d): string
     {
+        $seed = (string) (($d['company_name'] ?? '') . '|' . ($d['industry'] ?? ''));
+        $variant = $this->pickFallbackVariant($seed, 3);
+        $theme = $this->pickFallbackTheme();
+
+        return match ($variant) {
+            1 => $this->renderCompanyFallbackTemplateNexoraClassic($d, $theme),
+            2 => $this->renderCompanyFallbackTemplateNexoraStudio($d, $theme),
+            default => $this->renderCompanyFallbackTemplateNexoraEnterprise($d, $theme),
+        };
+
         $theme = $this->pickFallbackTheme();
         $company = $this->e($d['company_name'] ?? 'Perusahaan Anda');
         $industry = $this->e($d['industry'] ?? 'Industri');
@@ -168,6 +558,7 @@ class LandingGenerateController extends Controller
       --footer-link: {$theme['footerLink']};
       --hero-grad-a: {$theme['heroA']};
       --hero-grad-b: {$theme['heroB']};
+      --accent: #f8fafc;
     }
     * { box-sizing:border-box; }
     html { scroll-behavior:smooth; }
@@ -178,46 +569,186 @@ class LandingGenerateController extends Controller
       background:radial-gradient(circle at top right, rgba(255,255,255,.45), transparent 36%), var(--bg);
       line-height:1.6;
     }
-    .container { width:min(1080px, 92vw); margin:0 auto; }
-    .header { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid var(--border); }
+    .container { width:min(1120px, 92vw); margin:0 auto; }
+    .header { position:sticky; top:0; z-index:20; backdrop-filter: blur(12px); background:rgba(255,255,255,.94); border-bottom:1px solid var(--border); }
     .header-inner { display:flex; justify-content:space-between; align-items:center; padding:14px 0; gap:16px; }
-    .brand { font-weight:700; color:var(--primary); text-decoration:none; font-size:1.1rem; }
-    .nav { display:flex; gap:18px; }
+    .brand { font-weight:800; color:var(--primary); text-decoration:none; font-size:1.15rem; letter-spacing:-.02em; }
+    .nav { display:flex; gap:18px; flex-wrap:wrap; justify-content:flex-end; }
     .nav a { color:var(--text); text-decoration:none; font-weight:600; font-size:.95rem; }
-    .hero { padding:56px 0 30px; }
+    .hero { padding:56px 0 18px; }
     .hero-card {
       background:linear-gradient(135deg, var(--hero-grad-a), var(--hero-grad-b));
       border:1px solid var(--border);
-      border-radius:20px;
-      padding:28px;
-      box-shadow:0 12px 30px rgba(0,0,0,.08);
+      border-radius:26px;
+      padding:30px;
+      box-shadow:0 22px 44px rgba(15,23,42,.10);
+    }
+    .hero-grid {
+      display:grid;
+      grid-template-columns:1.4fr .8fr;
+      gap:20px;
+      align-items:stretch;
+    }
+    .eyebrow {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 12px;
+      border-radius:999px;
+      background:#fff;
+      border:1px solid rgba(255,255,255,.65);
+      color:var(--primary);
+      font-size:.82rem;
+      font-weight:800;
+      margin-bottom:14px;
     }
     h1,h2,h3 { margin:0 0 10px; line-height:1.3; }
-    h1 { font-size:clamp(1.6rem, 4vw, 2.4rem); }
-    h2 { font-size:clamp(1.3rem, 3vw, 1.8rem); margin-top:14px; }
+    h1 { font-size:clamp(2rem, 4vw, 3.35rem); letter-spacing:-.03em; }
+    h2 { font-size:clamp(1.35rem, 3vw, 2rem); margin-top:14px; letter-spacing:-.02em; }
+    h3 { font-size:1.05rem; }
     p { margin:0 0 10px; color:var(--muted); }
+    .hero-copy p { font-size:1.02rem; max-width:62ch; }
     .btn {
       display:inline-block;
-      margin-top:12px;
+      margin-top:14px;
       background:var(--primary);
       color:#fff;
       text-decoration:none;
-      border-radius:12px;
-      padding:10px 16px;
-      font-weight:700;
-      box-shadow:0 8px 20px rgba(0,0,0,.12);
+      border-radius:14px;
+      padding:12px 18px;
+      font-weight:800;
+      box-shadow:0 14px 30px rgba(15,23,42,.14);
+    }
+    .hero-panel {
+      background:rgba(255,255,255,.88);
+      border:1px solid var(--border);
+      border-radius:22px;
+      padding:22px;
+      display:grid;
+      gap:14px;
+      align-content:start;
+    }
+    .kicker {
+      font-size:.84rem;
+      font-weight:800;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--primary);
+    }
+    .stats {
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0, 1fr));
+      gap:12px;
+      margin-top:18px;
+    }
+    .stat {
+      background:#fff;
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding:16px;
+    }
+    .stat strong {
+      display:block;
+      font-size:1.2rem;
+      color:var(--text);
+      margin-bottom:4px;
     }
     .grid { display:grid; gap:16px; grid-template-columns:repeat(12, 1fr); margin:22px 0; }
     .card {
       background:var(--surface);
       border:1px solid var(--border);
-      border-radius:16px;
-      padding:18px;
-      box-shadow:0 8px 22px rgba(0,0,0,.06);
+      border-radius:20px;
+      padding:22px;
+      box-shadow:0 10px 26px rgba(15,23,42,.06);
     }
-    .col-6 { grid-column:span 6; } .col-12 { grid-column:span 12; } .col-4 { grid-column:span 4; }
+    .col-3 { grid-column:span 3; } .col-4 { grid-column:span 4; } .col-5 { grid-column:span 5; }
+    .col-6 { grid-column:span 6; } .col-7 { grid-column:span 7; } .col-8 { grid-column:span 8; } .col-12 { grid-column:span 12; }
     ul { margin:0; padding-left:18px; color:var(--muted); }
     li { margin:6px 0; }
+    .section-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:12px; }
+    .section-head p { max-width:52ch; }
+    .chip-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .chip {
+      display:inline-flex;
+      align-items:center;
+      padding:8px 12px;
+      border-radius:999px;
+      background:var(--accent);
+      border:1px solid var(--border);
+      color:var(--text);
+      font-size:.88rem;
+      font-weight:700;
+    }
+    .service-list, .portfolio-list, .achievement-list {
+      display:grid;
+      gap:12px;
+      margin-top:12px;
+      padding:0;
+      list-style:none;
+    }
+    .service-list li, .portfolio-list li, .achievement-list li {
+      margin:0;
+      padding:14px 16px;
+      border:1px solid var(--border);
+      border-radius:16px;
+      background:linear-gradient(180deg, rgba(255,255,255,.95), rgba(248,250,252,.92));
+    }
+    .timeline {
+      display:grid;
+      gap:12px;
+      margin-top:12px;
+    }
+    .timeline-item {
+      padding:14px 16px;
+      border-left:3px solid var(--primary);
+      background:#fff;
+      border-radius:0 14px 14px 0;
+      border:1px solid var(--border);
+      border-left-color:var(--primary);
+    }
+    .contact-grid {
+      display:grid;
+      grid-template-columns:1.05fr .95fr;
+      gap:18px;
+      margin:22px 0 8px;
+    }
+    .contact-list { display:grid; gap:12px; }
+    .contact-item {
+      padding:14px 16px;
+      border:1px solid var(--border);
+      border-radius:16px;
+      background:#fff;
+    }
+    .contact-item strong {
+      display:block;
+      margin-bottom:4px;
+      color:var(--text);
+    }
+    .form-box { display:grid; gap:12px; }
+    label { display:block; font-size:.92rem; font-weight:700; color:var(--text); margin-bottom:6px; }
+    input, textarea, button {
+      width:100%;
+      font:inherit;
+      border-radius:14px;
+    }
+    input, textarea {
+      border:1px solid var(--border);
+      padding:12px 14px;
+      background:#fff;
+      color:var(--text);
+    }
+    textarea { min-height:140px; resize:vertical; }
+    button {
+      border:0;
+      padding:13px 16px;
+      background:var(--primary);
+      color:#fff;
+      font-weight:800;
+      box-shadow:0 14px 26px rgba(15,23,42,.14);
+    }
+    .cta-card {
+      background:linear-gradient(135deg, rgba(255,255,255,.98), rgba(239,246,255,.94));
+    }
     .footer { background:var(--footer-bg); color:var(--footer-text); margin-top:28px; }
     .footer a { color:var(--footer-link); text-decoration:none; }
     .footer-top { display:grid; grid-template-columns:2fr 1fr 1fr; gap:20px; padding:28px 0 18px; }
@@ -234,10 +765,18 @@ class LandingGenerateController extends Controller
       font-size:12px;
     }
     .footer-bottom { border-top:1px solid var(--footer-border); padding:14px 0 22px; font-size:.9rem; color:var(--footer-text); }
-    @media (max-width: 900px) {
-      .col-6, .col-4 { grid-column:span 12; }
+    @media (max-width: 980px) {
+      .hero-grid, .contact-grid { grid-template-columns:1fr; }
+      .stats { grid-template-columns:1fr; }
+      .col-8, .col-7, .col-6, .col-5, .col-4, .col-3 { grid-column:span 12; }
       .footer-top { grid-template-columns:1fr; }
       .nav { gap:12px; }
+    }
+    @media (max-width: 640px) {
+      .container { width:min(100% - 20px, 1120px); }
+      .header-inner { flex-direction:column; align-items:flex-start; }
+      .nav { justify-content:flex-start; }
+      .hero-card, .card { padding:18px; border-radius:18px; }
     }
   </style>
 </head>
@@ -248,6 +787,8 @@ class LandingGenerateController extends Controller
       <nav class="nav" aria-label="Navigasi utama">
         <a href="#tentang">Tentang</a>
         <a href="#layanan">Layanan</a>
+        <a href="#portfolio">Portfolio</a>
+        <a href="#tim">Tim</a>
         <a href="#kontak">Kontak</a>
       </nav>
     </div>
@@ -256,65 +797,188 @@ class LandingGenerateController extends Controller
   <main class="container">
     <section class="hero">
       <div class="hero-card">
-        <h1>{$company}</h1>
-        <p><strong>{$industry}</strong></p>
-        <p>{$tagline}</p>
-        <a class="btn" href="#kontak">{$cta}</a>
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <span class="eyebrow">Company Profile</span>
+            <h1>{$tagline}</h1>
+            <p><strong>{$company}</strong> adalah mitra {$industry} yang membantu bisnis membangun fondasi digital yang lebih rapi, terukur, dan siap berkembang dalam jangka panjang.</p>
+            <div class="chip-row">
+              <span class="chip">Fokus Industri: {$industry}</span>
+              <span class="chip">Target: {$target}</span>
+            </div>
+            <a class="btn" href="#kontak">{$cta}</a>
+          </div>
+          <aside class="hero-panel">
+            <div>
+              <div class="kicker">Ringkasan</div>
+              <p>{$overview}</p>
+            </div>
+            <div>
+              <div class="kicker">Unique Value</div>
+              <p>{$uvp}</p>
+            </div>
+          </aside>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <strong>01</strong>
+            <span>Strategi digital yang disusun sesuai kebutuhan bisnis.</span>
+          </div>
+          <div class="stat">
+            <strong>02</strong>
+            <span>Eksekusi yang cepat, rapi, dan mudah dipresentasikan ke klien.</span>
+          </div>
+          <div class="stat">
+            <strong>03</strong>
+            <span>Pendampingan yang membuat proses implementasi lebih jelas.</span>
+          </div>
+        </div>
       </div>
     </section>
 
     <section id="tentang" class="grid">
-      <div class="card col-6">
-        <h2>Tentang Kami</h2>
+      <div class="card col-7">
+        <div class="section-head">
+          <div>
+            <h2>Tentang Kami</h2>
+            <p>Profil singkat perusahaan dan arah pengembangan layanan.</p>
+          </div>
+        </div>
         <p>{$overview}</p>
+      </div>
+      <div class="card col-5">
+        <div class="section-head">
+          <div>
+            <h2>Target Market</h2>
+            <p>Segmen bisnis yang menjadi fokus utama layanan kami.</p>
+          </div>
+        </div>
+        <p>{$target}</p>
       </div>
       <div class="card col-6">
         <h2>Visi</h2>
         <p>{$vision}</p>
+      </div>
+      <div class="card col-6">
         <h2>Misi</h2>
         <ul>{$mission}</ul>
-      </div>
-      <div class="card col-6">
-        <h2>Target Market</h2>
-        <p>{$target}</p>
-      </div>
-      <div class="card col-6">
-        <h2>Keunggulan Kami</h2>
-        <p>{$uvp}</p>
       </div>
     </section>
 
     <section id="layanan" class="grid">
-      <div class="card col-12">
-        <h2>Layanan Utama</h2>
-        <ul>{$services}</ul>
+      <div class="card col-7">
+        <div class="section-head">
+          <div>
+            <h2>Layanan Utama</h2>
+            <p>Layanan inti yang dirancang untuk membantu bisnis bertumbuh secara terukur.</p>
+          </div>
+        </div>
+        <ul class="service-list">{$services}</ul>
+      </div>
+      <div class="card col-5">
+        <div class="section-head">
+          <div>
+            <h2>Keunggulan Kami</h2>
+            <p>Nilai tambah yang membuat kolaborasi lebih efektif.</p>
+          </div>
+        </div>
+        <div class="timeline">
+          <div class="timeline-item">Pendekatan konsultatif yang menyesuaikan kebutuhan bisnis.</div>
+          <div class="timeline-item">Tim yang fokus pada hasil, bukan hanya deliverable teknis.</div>
+          <div class="timeline-item">Komunikasi transparan dengan alur kerja yang mudah dipahami.</div>
+        </div>
+        <p style="margin-top:14px">{$uvp}</p>
+      </div>
+      <div id="portfolio" class="card col-6">
+        <div class="section-head">
+          <div>
+            <h2>Portfolio</h2>
+            <p>Contoh fokus proyek dan implementasi yang pernah ditangani.</p>
+          </div>
+        </div>
+        <ul class="portfolio-list">{$portfolio}</ul>
       </div>
       <div class="card col-6">
-        <h2>Pencapaian</h2>
-        <ul>{$achievements}</ul>
+        <div class="section-head">
+          <div>
+            <h2>Pencapaian</h2>
+            <p>Indikator yang menunjukkan konsistensi kinerja perusahaan.</p>
+          </div>
+        </div>
+        <ul class="achievement-list">{$achievements}</ul>
       </div>
-      <div class="card col-6">
-        <h2>Portfolio</h2>
-        <ul>{$portfolio}</ul>
-      </div>
-      <div class="card col-12">
+      <div id="tim" class="card col-12">
         <h2>Tim</h2>
         <p>{$team}</p>
       </div>
     </section>
+
+    <section class="grid">
+      <div class="card cta-card col-12">
+        <div class="section-head">
+          <div>
+            <h2>Siap Berkolaborasi dengan {$company}</h2>
+            <p>Kami membuka peluang kerja sama untuk bisnis yang ingin memperkuat identitas digital, meningkatkan efisiensi operasional, dan menyiapkan sistem yang lebih scalable.</p>
+          </div>
+        </div>
+        <a class="btn" href="#kontak">{$cta}</a>
+      </div>
+    </section>
+
+    <section id="kontak" class="contact-grid">
+      <div class="card">
+        <div class="section-head">
+          <div>
+            <h2>Kontak Perusahaan</h2>
+            <p>Hubungi kami untuk diskusi kebutuhan bisnis, konsultasi awal, atau permintaan penawaran kerja sama.</p>
+          </div>
+        </div>
+        <div class="contact-list">
+          <div class="contact-item"><strong>Email</strong><span>{$email}</span></div>
+          <div class="contact-item"><strong>Telepon / WhatsApp</strong><span>{$phone}</span></div>
+          <div class="contact-item"><strong>Alamat</strong><span>{$address}</span></div>
+          <div class="contact-item"><strong>Media Sosial / Link</strong><span>{$social}</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <div>
+            <h2>Kirim Pesan</h2>
+            <p>Form singkat untuk memulai komunikasi dengan tim kami.</p>
+          </div>
+        </div>
+        <form class="form-box">
+          <div>
+            <label>Nama</label>
+            <input type="text" placeholder="Nama lengkap" />
+          </div>
+          <div>
+            <label>Email</label>
+            <input type="email" placeholder="nama@perusahaan.com" />
+          </div>
+          <div>
+            <label>Pesan</label>
+            <textarea placeholder="Ceritakan kebutuhan bisnis Anda"></textarea>
+          </div>
+          <button type="button">{$cta}</button>
+        </form>
+      </div>
+    </section>
   </main>
 
-  <footer id="kontak" class="footer">
+  <footer class="footer">
     <div class="container footer-top">
       <div>
         <h3>{$company}</h3>
-        <p>Partner tepercaya untuk kebutuhan {$industry} dengan eksekusi yang terukur.</p>
+        <p>{$company} adalah partner tepercaya untuk kebutuhan {$industry} dengan strategi yang relevan, eksekusi yang terukur, dan pendekatan kolaboratif.</p>
       </div>
       <div>
         <h3>Navigasi</h3>
         <p><a href="#home">Home</a></p>
         <p><a href="#tentang">Tentang</a></p>
         <p><a href="#layanan">Layanan</a></p>
+        <p><a href="#portfolio">Portfolio</a></p>
+        <p><a href="#tim">Tim</a></p>
         <p><a href="#kontak">Kontak</a></p>
       </div>
       <div>
@@ -326,16 +990,276 @@ class LandingGenerateController extends Controller
         <div class="social"><span>IG</span><span>IN</span><span>YT</span></div>
       </div>
     </div>
-    <div class="container footer-bottom">© 2026 {$company}. All rights reserved.</div>
+    <div class="container footer-bottom">&copy; 2026 {$company}. All rights reserved.</div>
   </footer>
 </body>
 </html>
 HTML;
     }
 
+    private function pickFallbackVariant(string $seed, int $count): int
+    {
+        $normalizedSeed = trim($seed) !== '' ? $seed : 'fallback-template';
+        $hash = (int) sprintf('%u', crc32($normalizedSeed));
+
+        return ($hash % max(1, $count)) + 1;
+    }
+
+    private function textItems(string $text, array $fallback, int $limit = 6): array
+    {
+        $rows = preg_split('/\r\n|\r|\n|,|;/', (string) $text);
+        $rows = array_values(array_filter(array_map(fn ($r) => trim($r), $rows ?: []), fn ($r) => $r !== ''));
+
+        if ($rows === []) {
+            $rows = $fallback;
+        }
+
+        return array_slice($rows, 0, $limit);
+    }
+
+    private function htmlListItems(array $items): string
+    {
+        return implode('', array_map(fn ($item) => '<li>' . $this->e($item) . '</li>', $items));
+    }
+
+    private function htmlCardItems(array $items, string $className): string
+    {
+        return implode('', array_map(fn ($item) => '<article class="' . $className . '"><p>' . $this->e($item) . '</p></article>', $items));
+    }
+
+    private function buildLandingFallbackPayload(array $d, array $theme): array
+    {
+        $company = $this->e($d['company_name'] ?? 'Brand Anda');
+        $product = $this->e($d['product'] ?? 'Produk unggulan');
+        $audience = $this->e($d['audience'] ?? 'Audiens yang tepat');
+        $offer = $this->e($d['main_offer'] ?? "Solusi praktis untuk {$audience}");
+        $price = $this->e($d['price_note'] ?? 'Penawaran spesial tersedia hari ini.');
+        $bonus = $this->e($d['bonus'] ?? 'Bonus panduan dan pendampingan singkat.');
+        $urgency = $this->e($d['urgency'] ?? 'Slot promo terbatas untuk batch saat ini.');
+        $cta = $this->e($d['cta'] ?? 'Daftar Sekarang');
+        $contact = $this->e($d['contact'] ?? 'Hubungi kami untuk info lebih lanjut.');
+        $brandColor = $this->normalizeColor($d['brand_color'] ?? $theme['primary']);
+
+        return compact('company', 'product', 'audience', 'offer', 'price', 'bonus', 'urgency', 'cta', 'contact', 'brandColor');
+    }
+
+    private function renderLandingFallbackTemplateScalevStyle(array $d, array $theme): string
+    {
+        extract($this->buildLandingFallbackPayload($d, $theme));
+        $personas = $this->htmlCardItems(
+            [
+                "Pemilik bisnis yang ingin menjual {$product} dengan halaman yang lebih rapi.",
+                "Tim marketing yang perlu materi promosi cepat untuk target {$audience}.",
+                "Kreator atau admin brand yang ingin CTA lebih jelas dan konversi lebih tinggi.",
+            ],
+            'persona-card'
+        );
+        $benefits = $this->htmlCardItems(
+            [
+                "Pesan utama langsung fokus ke manfaat {$product}.",
+                "Struktur halaman disusun agar pengunjung cepat paham lalu bertindak.",
+                "Konten mudah dipakai ulang untuk campaign, iklan, dan WhatsApp blast.",
+                "Tambahan bonus membuat penawaran terasa lebih bernilai.",
+            ],
+            'benefit-card'
+        );
+        $testimonials = $this->htmlCardItems(
+            [
+                "{$company} bantu kami menyusun penawaran lebih jelas dan closing jadi lebih cepat.",
+                "Landing page ini enak dibaca, simple, dan langsung menonjolkan inti manfaat produk.",
+                "Calon pelanggan lebih mudah paham offer karena isi halamannya rapi dan meyakinkan.",
+            ],
+            'quote-card'
+        );
+        $faqs = <<<HTML
+<details class="faq-item"><summary>Apakah penawaran ini cocok untuk {$audience}?</summary><p>Ya. Struktur fallback ini dibuat agar pesan utamanya tetap relevan untuk {$audience} dan siap dipresentasikan.</p></details>
+<details class="faq-item"><summary>Apa yang didapat pelanggan?</summary><p>Pelanggan akan mendapatkan {$product}, dengan fokus manfaat yang jelas dan penjelasan yang lebih mudah dipahami.</p></details>
+<details class="faq-item"><summary>Apakah ada bonus tambahan?</summary><p>{$bonus}</p></details>
+<details class="faq-item"><summary>Apakah promo ini terbatas?</summary><p>{$urgency}</p></details>
+<details class="faq-item"><summary>Bagaimana cara menghubungi tim?</summary><p>{$contact}</p></details>
+HTML;
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$company} - {$product}</title>
+  <style>
+    :root{--primary:{$brandColor};--accent:#facc15;--bg:#fbf6df;--panel:#103c2f;--surface:#fffdf7;--text:#112031;--muted:#506176;--border:rgba(17,32,49,.10);}
+    *{box-sizing:border-box} body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top,#fff7cc 0,#fbf6df 40%,#f5f0d7 100%);color:var(--text);line-height:1.6}
+    .page{width:min(980px,calc(100% - 28px));margin:24px auto 56px}.card{background:var(--surface);border:1px solid var(--border);border-radius:26px;padding:24px;box-shadow:0 22px 44px rgba(16,24,40,.08);margin-bottom:18px}
+    .hero{background:var(--panel);color:#fff;border-color:rgba(255,255,255,.08)} .hero p,.hero li{color:#d7e6df}.eyebrow{display:inline-flex;padding:8px 14px;border-radius:999px;background:#f6e27a;color:#3f3510;font-size:12px;font-weight:800;margin-bottom:14px}
+    h1,h2,h3{margin:0 0 12px;line-height:1.15} h1{font-size:clamp(2.1rem,5vw,3.6rem);max-width:12ch} h2{font-size:clamp(1.4rem,3vw,2rem)} p{margin:0 0 12px;color:var(--muted)}
+    .hero-grid,.grid,.quote-grid,.persona-grid{display:grid;gap:16px}.hero-grid{grid-template-columns:1.2fr .8fr;align-items:start}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.quote-grid,.persona-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .side-card,.benefit-card,.persona-card,.quote-card,.price-card{border:1px solid var(--border);border-radius:20px;padding:18px;background:#fff}.benefit-card,.persona-card,.quote-card p{margin:0}
+    .metric{display:block;font-size:1.7rem;font-weight:800;color:#fff}.btn,.btn-secondary{display:inline-block;padding:14px 20px;border-radius:14px;text-decoration:none;font-weight:800}
+    .btn{background:var(--accent);color:#2a2410}.btn-secondary{background:#fff;color:var(--primary);border:1px solid rgba(255,255,255,.24)} .cta-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px}
+    .price-wrap{display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center}.strike{font-size:1rem;color:#8b98a8;text-decoration:line-through}.price{font-size:2rem;font-weight:900;color:var(--primary)}
+    .form-box{display:grid;gap:12px} label{display:block;font-size:.92rem;font-weight:700;margin-bottom:6px} input,textarea,button{width:100%;font:inherit;border-radius:14px} input,textarea{border:1px solid var(--border);padding:12px 14px;background:#fff;color:var(--text)} textarea{min-height:128px;resize:vertical}
+    button{border:0;background:var(--primary);color:#fff;padding:14px;font-weight:800}.faq-item{border:1px solid var(--border);border-radius:16px;padding:0 16px;background:#fff;margin-bottom:10px} .faq-item summary{cursor:pointer;list-style:none;padding:16px 0;font-weight:700}
+    .note{font-size:.9rem;color:#6d7c8c}.footer{text-align:center;color:#68778a;font-size:.92rem;padding-top:8px}
+    @media (max-width:820px){.hero-grid,.price-wrap,.grid,.quote-grid,.persona-grid{grid-template-columns:1fr}.page{width:min(100% - 20px,980px)}.card{padding:18px;border-radius:20px}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="card hero">
+      <div class="hero-grid">
+        <div>
+          <span class="eyebrow">Promo Spesial</span>
+          <h1>{$offer}</h1>
+          <p><strong>{$company}</strong> menghadirkan {$product} untuk {$audience} dengan halaman promosi yang rapi, boxed, dan siap dipakai untuk presentasi maupun campaign.</p>
+          <p>{$urgency}</p>
+          <div class="cta-row">
+            <a class="btn" href="#form-order">{$cta}</a>
+            <a class="btn-secondary" href="#harga">Lihat Detail</a>
+          </div>
+        </div>
+        <aside class="side-card">
+          <h3>Kenapa menarik?</h3>
+          <p>Penawaran utama langsung fokus ke manfaat, bonus, dan CTA sehingga pengunjung tidak bingung menentukan langkah berikutnya.</p>
+          <span class="metric">1000+</span>
+          <p>Struktur promosi boxed seperti reference sales page dengan ritme konten yang padat.</p>
+        </aside>
+      </div>
+    </section>
+    <section class="card"><h2>Kenapa Penawaran Ini Relevan?</h2><div class="grid">{$benefits}</div></section>
+    <section class="card"><h2>Siapa yang Cocok?</h2><div class="persona-grid">{$personas}</div></section>
+    <section id="harga" class="card"><div class="price-wrap"><div><h2>Promo Hari Ini</h2><p>{$product}</p><p>{$bonus}</p></div><div class="price-card"><div class="strike">Harga Normal Menyesuaikan Paket</div><div class="price">{$price}</div><p class="note">{$urgency}</p></div></div></section>
+    <section class="card"><h2>Testimoni Ringkas</h2><div class="quote-grid">{$testimonials}</div></section>
+    <section class="card"><h2>FAQ</h2>{$faqs}</section>
+    <section id="form-order" class="card"><h2>Ambil Penawaran Sekarang</h2><p>Isi form singkat berikut agar tim {$company} bisa menghubungi kamu lebih cepat.</p><div class="form-box"><div><label>Nama</label><input type="text" placeholder="Nama lengkap" /></div><div><label>No. WhatsApp</label><input type="text" placeholder="08xxxxxxxxxx" /></div><div><label>Kebutuhan</label><textarea placeholder="Ceritakan kebutuhan kamu secara singkat"></textarea></div><button type="button">{$cta}</button></div><p class="note">Produk/layanan diproses secara digital dan tim akan menindaklanjuti melalui kontak yang tersedia.</p></section>
+    <footer class="footer"><p>{$company} &bull; {$contact}</p><p>&copy; 2026 {$company}. All rights reserved.</p></footer>
+  </main>
+</body>
+</html>
+HTML;
+    }
+
+    private function renderLandingFallbackTemplateEditorialStyle(array $d, array $theme): string
+    {
+        return $this->renderLandingFallbackTemplateScalevStyle($d, $theme);
+    }
+
+    private function renderLandingFallbackTemplateStoryStyle(array $d, array $theme): string
+    {
+        return $this->renderLandingFallbackTemplateScalevStyle($d, $theme);
+    }
+
+    private function buildCompanyFallbackPayload(array $d, array $theme): array
+    {
+        $company = $this->e($d['company_name'] ?? 'Perusahaan Anda');
+        $industry = $this->e($d['industry'] ?? 'Industri');
+        $tagline = $this->e($d['tagline'] ?? 'Mitra tepercaya untuk pertumbuhan bisnis Anda.');
+        $overview = $this->e($d['company_overview'] ?? 'Kami membantu bisnis berkembang dengan solusi yang terukur.');
+        $vision = $this->e($d['vision'] ?? 'Menjadi perusahaan terpercaya di bidang layanan kami.');
+        $target = $this->e($d['target_market'] ?? 'Perusahaan, UMKM, dan organisasi yang ingin bertumbuh lebih cepat.');
+        $uvp = $this->e($d['unique_value'] ?? 'Pendekatan strategis, eksekusi cepat, dan komunikasi yang transparan.');
+        $team = $this->e($d['team_info'] ?? 'Tim berpengalaman lintas disiplin untuk memastikan hasil yang konsisten.');
+        $email = $this->e($d['contact_email'] ?? 'hello@company.test');
+        $phone = $this->e($d['contact_phone'] ?? '08xxxxxxxxxx');
+        $address = $this->e($d['address'] ?? 'Indonesia');
+        $social = $this->e($d['social_links'] ?? 'LinkedIn, Instagram, Website');
+        $cta = $this->e($d['cta'] ?? 'Hubungi Kami');
+        $brandColor = $this->normalizeColor($d['brand_color'] ?? $theme['primary']);
+        $mission = $this->textItems((string) ($d['mission'] ?? ''), [
+            'Memberikan solusi digital yang relevan dan mudah diimplementasikan.',
+            'Mendampingi bisnis agar proses transformasi lebih terarah.',
+            'Menjaga kualitas eksekusi dengan komunikasi yang transparan.',
+        ]);
+        $services = $this->textItems((string) ($d['services'] ?? ''), [
+            'Website Development',
+            'Custom System Development',
+            'UI/UX Design',
+            'Maintenance & IT Support',
+        ]);
+        $achievements = $this->textItems((string) ($d['achievements'] ?? ''), [
+            'Proyek lintas industri selesai tepat waktu.',
+            'Kolaborasi jangka panjang dengan klien bisnis.',
+            'Standar kerja yang rapi dan mudah dipresentasikan.',
+        ]);
+        $portfolio = $this->textItems((string) ($d['portfolio'] ?? ''), [
+            'Website corporate untuk brand yang sedang bertumbuh.',
+            'Sistem internal untuk efisiensi operasional tim.',
+            'Produk digital dan dashboard untuk kebutuhan monitoring bisnis.',
+        ]);
+
+        return compact('company', 'industry', 'tagline', 'overview', 'vision', 'target', 'uvp', 'team', 'email', 'phone', 'address', 'social', 'cta', 'brandColor', 'mission', 'services', 'achievements', 'portfolio');
+    }
+
+    private function renderCompanyFallbackTemplateNexoraClassic(array $d, array $theme): string
+    {
+        extract($this->buildCompanyFallbackPayload($d, $theme));
+        $servicesHtml = $this->htmlCardItems($services, 'service-card');
+        $portfolioHtml = $this->htmlCardItems($portfolio, 'project-card');
+        $achievementHtml = $this->htmlCardItems($achievements, 'stat-card');
+        $missionHtml = $this->htmlListItems($mission);
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$company} - Company Profile</title>
+  <style>
+    :root{--primary:{$brandColor};--bg:#f5f7fb;--surface:#ffffff;--text:#0f172a;--muted:#5d6b80;--border:rgba(15,23,42,.10);--dark:#0b1220}
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(180deg,#f5f7fb 0,#fff 100%);color:var(--text);line-height:1.65}
+    .container{width:min(1120px,92vw);margin:0 auto}.header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+    .header-inner{display:flex;justify-content:space-between;align-items:center;padding:15px 0;gap:16px}.brand{font-size:1.18rem;font-weight:800;color:var(--primary);text-decoration:none}.nav{display:flex;gap:18px;flex-wrap:wrap}
+    .nav a{color:var(--text);text-decoration:none;font-weight:600}.hero{padding:54px 0 24px}.hero-card{background:linear-gradient(135deg,#0f172a 0,{$brandColor} 100%);border-radius:30px;padding:32px;color:#fff;box-shadow:0 28px 56px rgba(15,23,42,.12)}
+    .hero-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:22px;align-items:center}.eyebrow{display:inline-flex;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.14);font-size:12px;font-weight:800;margin-bottom:12px}
+    h1,h2,h3{margin:0 0 12px;line-height:1.14} h1{font-size:clamp(2rem,4.4vw,3.6rem)} h2{font-size:clamp(1.35rem,3vw,2rem)} p{margin:0 0 12px;color:var(--muted)} .hero-card p{color:#d9e6ff}
+    .btn{display:inline-block;padding:14px 20px;border-radius:14px;background:#fff;color:var(--primary);font-weight:800;text-decoration:none}
+    .glass{padding:22px;border-radius:24px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18)}
+    .stats,.grid,.contact-grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:22px}.grid{grid-template-columns:repeat(12,minmax(0,1fr));margin:22px 0}.contact-grid{grid-template-columns:1fr 1fr;margin:24px 0 10px}
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:22px;box-shadow:0 12px 26px rgba(15,23,42,.05)} .col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-6{grid-column:span 6}.col-7{grid-column:span 7}.col-12{grid-column:span 12}
+    .service-card,.project-card,.stat-card{border:1px solid var(--border);border-radius:18px;padding:18px;background:linear-gradient(180deg,#fff,#f8fbff)} .service-card p,.project-card p,.stat-card p{margin:0}
+    .mission-list{padding-left:18px}.mission-list li{margin:6px 0;color:var(--muted)} .stack{display:flex;flex-wrap:wrap;gap:10px}.stack span{padding:9px 12px;border-radius:999px;background:#eef4ff;border:1px solid rgba(59,130,246,.12);font-weight:700;color:var(--text);font-size:.9rem}
+    label{display:block;font-size:.92rem;font-weight:700;margin-bottom:6px} input,textarea,button{width:100%;font:inherit;border-radius:14px} input,textarea{border:1px solid var(--border);padding:12px 14px} textarea{min-height:136px;resize:vertical}
+    button{border:0;background:var(--primary);color:#fff;padding:14px;font-weight:800}.footer{background:var(--dark);color:#9fb0c7;margin-top:30px}.footer a{color:#e5eefb;text-decoration:none}.footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:20px;padding:28px 0}.footer-bottom{border-top:1px solid rgba(255,255,255,.10);padding:14px 0 24px;font-size:.92rem}
+    @media (max-width:960px){.hero-grid,.contact-grid,.stats{grid-template-columns:1fr}.col-7,.col-6,.col-5,.col-4{grid-column:span 12}.footer-grid{grid-template-columns:1fr}}
+    @media (max-width:640px){.container{width:min(100% - 20px,1120px)}.header-inner{flex-direction:column;align-items:flex-start}.hero-card,.card{padding:18px;border-radius:20px}}
+  </style>
+</head>
+<body>
+  <header class="header" id="home"><div class="container header-inner"><a class="brand" href="#home">{$company}</a><nav class="nav"><a href="#tentang">Tentang</a><a href="#layanan">Layanan</a><a href="#project">Project</a><a href="#tim">Tim</a><a href="#kontak">Kontak</a></nav></div></header>
+  <main class="container">
+    <section class="hero"><div class="hero-card"><div class="hero-grid"><div><h1>{$tagline}</h1><p>{$company} bergerak di bidang {$industry} dan hadir untuk membantu bisnis membangun solusi digital yang efektif, profesional, dan scalable.</p><a class="btn" href="#kontak">{$cta}</a></div><aside class="glass"><h3>Tentang Singkat</h3><p>{$overview}</p><p><strong style="color:#fff">Target Market</strong><br />{$target}</p></aside></div><div class="stats"><div class="glass"><strong>150+</strong><p>Project dan inisiatif digital</p></div><div class="glass"><strong>100+</strong><p>Kolaborasi bisnis aktif</p></div><div class="glass"><strong>5+</strong><p>Tahun pengalaman tim inti</p></div><div class="glass"><strong>24/7</strong><p>Komitmen support dan evaluasi</p></div></div></div></section>
+    <section id="tentang" class="grid"><div class="card col-7"><h2>Tentang Kami</h2><p>{$overview}</p></div><div class="card col-5"><h2>Visi</h2><p>{$vision}</p><h3>Misi</h3><ul class="mission-list">{$missionHtml}</ul></div></section>
+    <section id="layanan" class="grid"><div class="card col-7"><h2>Layanan Utama</h2><div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr));margin:0">{$servicesHtml}</div></div><div class="card col-5"><h2>Keunggulan</h2><p>{$uvp}</p><div class="stack"><span>React</span><span>Laravel</span><span>UI/UX</span><span>Cloud Deploy</span><span>Automation</span></div></div></section>
+    <section id="project" class="grid"><div class="card col-12"><h2>Project Highlight</h2><div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));margin:0">{$portfolioHtml}</div></div></section>
+    <section id="tim" class="grid"><div class="card col-6"><h2>Leadership & Team</h2><p>{$team}</p></div><div class="card col-6"><h2>Pencapaian</h2><div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));margin:0">{$achievementHtml}</div></div></section>
+    <section id="kontak" class="contact-grid"><div class="card"><h2>Kontak Kami</h2><p>Email: {$email}</p><p>Telepon: {$phone}</p><p>Alamat: {$address}</p><p>Sosial: {$social}</p></div><div class="card"><h2>Kirim Pesan</h2><div><label>Nama</label><input type="text" placeholder="Nama lengkap" /></div><div><label>Email</label><input type="email" placeholder="nama@perusahaan.com" /></div><div><label>Pesan</label><textarea placeholder="Ceritakan kebutuhan bisnis Anda"></textarea></div><div style="margin-top:12px"><button type="button">{$cta}</button></div></div></section>
+  </main>
+  <footer class="footer"><div class="container footer-grid"><div><h3 style="color:#fff;margin:0 0 10px">{$company}</h3><p>{$company} adalah mitra {$industry} yang membantu bisnis bertumbuh melalui solusi digital yang relevan, rapi, dan siap dieksekusi.</p></div><div><h3 style="color:#fff;margin:0 0 10px">Navigasi</h3><p><a href="#home">Home</a></p><p><a href="#tentang">Tentang</a></p><p><a href="#layanan">Layanan</a></p><p><a href="#project">Project</a></p></div><div><h3 style="color:#fff;margin:0 0 10px">Kontak</h3><p>{$email}</p><p>{$phone}</p><p>{$address}</p></div></div><div class="container footer-bottom">&copy; 2026 {$company}. All rights reserved.</div></footer>
+</body>
+</html>
+HTML;
+    }
+
+    private function renderCompanyFallbackTemplateNexoraStudio(array $d, array $theme): string
+    {
+        return $this->renderCompanyFallbackTemplateNexoraClassic($d, $theme);
+    }
+
+    private function renderCompanyFallbackTemplateNexoraEnterprise(array $d, array $theme): string
+    {
+        return $this->renderCompanyFallbackTemplateNexoraClassic($d, $theme);
+    }
+
     private function pickFallbackTheme(): array
     {
-        $themes = [
+        $themes = $this->companyThemeOptions();
+
+        return $themes[array_rand($themes)];
+    }
+
+    private function companyThemeOptions(): array
+    {
+        return [
             [
                 'primary' => '#1456D9',
                 'text' => '#111827',
@@ -379,8 +1303,6 @@ HTML;
                 'heroB' => '#fef3c7',
             ],
         ];
-
-        return $themes[array_rand($themes)];
     }
 
     private function e(string $text): string
@@ -398,6 +1320,21 @@ HTML;
         return $c;
     }
 
+    private function compactPromptText(?string $text, int $maxLength = 220): string
+    {
+        $value = trim((string) $text);
+        if ($value === '') {
+            return '';
+        }
+
+        $value = preg_replace('/\s+/', ' ', $value) ?? $value;
+        if (mb_strlen($value) <= $maxLength) {
+            return $value;
+        }
+
+        return rtrim(mb_substr($value, 0, max(40, $maxLength - 3))) . '...';
+    }
+
     private function listFromText(string $text): string
     {
         $rows = preg_split('/\r\n|\r|\n|,|;/', (string) $text);
@@ -410,11 +1347,52 @@ HTML;
         return implode('', array_map(fn ($r) => '<li>' . $this->e($r) . '</li>', array_slice($rows, 0, 6)));
     }
 
+    private function summarizeFallbackReason(string $message): string
+    {
+        $text = strtolower($message);
+
+        if (
+            str_contains($text, 'output ai belum selesai') ||
+            str_contains($text, 'output ai company profile belum selesai') ||
+            str_contains($text, 'output ai kepotong') ||
+            str_contains($text, 'ai tidak mengembalikan html')
+        ) {
+            return 'output AI sebelumnya kepotong atau belum lengkap';
+        }
+
+        if (
+            str_contains($text, 'too many requests') ||
+            str_contains($text, 'resource exhausted') ||
+            str_contains($text, 'retry in') ||
+            str_contains($text, 'quota') ||
+            str_contains($text, 'cooldown')
+        ) {
+            return 'kuota atau rate limit Gemini sedang penuh';
+        }
+
+        if (
+            str_contains($text, 'high demand') ||
+            str_contains($text, 'temporarily unavailable') ||
+            str_contains($text, 'overloaded') ||
+            str_contains($text, 'http 503')
+        ) {
+            return 'server Gemini sedang padat';
+        }
+
+        if (str_contains($text, 'timeout') || str_contains($text, 'terputus')) {
+            return 'koneksi ke Gemini sedang timeout atau terputus';
+        }
+
+        return 'layanan AI sedang bermasalah sementara';
+    }
+
     private function callGeminiHtmlWithFallback(
         string $prompt,
         string $apiKey,
         string $preferredModel,
-        string $fallbackModel = ''
+        string $fallbackModel = '',
+        bool $ensureLandingStructure = false,
+        string $documentType = 'landing'
     ): string
     {
         $models = array_values(array_unique(array_filter([
@@ -423,39 +1401,83 @@ HTML;
         ])));
 
         $last = null;
+        $cooldowns = [];
+        $maxAttempts = max(1, min((int) env('GEMINI_MODEL_ATTEMPTS', 2), 3));
 
         foreach ($models as $idx => $model) {
-            try {
-                if ($idx > 0) {
-                    Log::warning('Gemini fallback model used', [
-                        'from' => $preferredModel,
-                        'to' => $model,
-                    ]);
-                }
-
-                return $this->callGeminiHtml($prompt, $apiKey, $model);
-            } catch (ValidationException $e) {
-                $last = $e;
-                $msg = $this->extractValidationMessage($e);
-
-                Log::warning('Gemini generate failed', [
+            $cooldownSeconds = $this->getModelCooldownSeconds($model);
+            if ($cooldownSeconds !== null) {
+                $cooldowns[$model] = $cooldownSeconds;
+                Log::warning('Gemini model skipped because cooldown is active', [
                     'model' => $model,
-                    'message' => $msg,
+                    'retry_in_seconds' => $cooldownSeconds,
                 ]);
+                continue;
+            }
 
-                if (str_contains(strtolower($msg), 'limit: 0, model:')) {
-                    throw ValidationException::withMessages([
-                        'ai' => [
-                            "Model {$model} belum punya kuota di project API key ini (limit: 0). " .
-                            "Pakai model lain yang tersedia atau set billing/kuota di Google AI Studio."
-                        ],
+            for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+                try {
+                    if ($idx > 0 && $attempt === 1) {
+                        Log::warning('Gemini fallback model used', [
+                            'from' => $preferredModel,
+                            'to' => $model,
+                        ]);
+                    }
+
+                    return $this->callGeminiHtml($prompt, $apiKey, $model, $ensureLandingStructure, $documentType);
+                } catch (ValidationException $e) {
+                    $last = $e;
+                    $msg = $this->extractValidationMessage($e);
+                    $friendlyMessage = $this->normalizeAiErrorMessage($msg);
+                    $retryAfterSeconds = $this->parseRetryAfterSeconds($msg);
+
+                    Log::warning('Gemini generate failed', [
+                        'model' => $model,
+                        'attempt' => $attempt,
+                        'message' => $msg,
                     ]);
-                }
 
-                if ($idx === count($models) - 1 || !$this->isRetryableAiError($msg)) {
-                    throw $e;
+                    if (str_contains(strtolower($msg), 'limit: 0, model:')) {
+                        throw ValidationException::withMessages([
+                            'ai' => [
+                                "Model {$model} belum punya kuota di project API key ini (limit: 0). " .
+                                "Pakai model lain yang tersedia atau set billing/kuota di Google AI Studio."
+                            ],
+                        ]);
+                    }
+
+                    if ($this->shouldCacheModelCooldown($msg)) {
+                        $cooldown = $retryAfterSeconds ?? $this->defaultCooldownSecondsForMessage($msg);
+                        $this->setModelCooldown($model, $cooldown, $friendlyMessage);
+                        $cooldowns[$model] = $cooldown;
+                    }
+
+                    if (!$this->isRetryableAiError($msg)) {
+                        throw ValidationException::withMessages([
+                            'ai' => [$friendlyMessage],
+                        ]);
+                    }
+
+                    if ($attempt < $maxAttempts && $this->canRetryImmediately($msg, $retryAfterSeconds)) {
+                        usleep($this->retryBackoffMicroseconds($attempt));
+                        continue;
+                    }
+
+                    if ($idx === count($models) - 1) {
+                        throw ValidationException::withMessages([
+                            'ai' => [$friendlyMessage],
+                        ]);
+                    }
+
+                    continue 2;
                 }
             }
+        }
+
+        if ($cooldowns !== [] && count($cooldowns) === count($models)) {
+            throw ValidationException::withMessages([
+                'ai' => [$this->buildCooldownMessage(min($cooldowns))],
+            ]);
         }
 
         if ($last instanceof ValidationException) {
@@ -485,18 +1507,211 @@ HTML;
             || str_contains($text, 'terputus')
             || str_contains($text, 'too many requests')
             || str_contains($text, 'resource exhausted')
+            || str_contains($text, 'high demand')
+            || str_contains($text, 'try again later')
+            || str_contains($text, 'temporarily unavailable')
+            || str_contains($text, 'overloaded')
             || str_contains($text, 'http 429')
             || str_contains($text, 'http 500')
-            || str_contains($text, 'http 503');
+            || str_contains($text, 'http 503')
+            || str_contains($text, 'retry in')
+            || str_contains($text, 'cooldown');
     }
 
-    private function callGeminiHtml(string $prompt, string $apiKey, string $model): string
+    private function shouldUseCompanyProfileFallback(string $message): bool
+    {
+        $text = strtolower($message);
+
+        return str_contains($text, 'output ai company profile belum selesai')
+            || str_contains($text, 'output ai belum selesai')
+            || str_contains($text, 'output ai kepotong')
+            || str_contains($text, 'ai tidak mengembalikan html')
+            || $this->shouldUseServiceFallback($text);
+    }
+
+    private function shouldUseLandingFallback(string $message): bool
+    {
+        $text = strtolower($message);
+
+        return str_contains($text, 'output ai belum selesai')
+            || str_contains($text, 'output ai kepotong')
+            || str_contains($text, 'ai tidak mengembalikan html')
+            || $this->shouldUseServiceFallback($text);
+    }
+
+    private function shouldUseServiceFallback(string $message): bool
+    {
+        return $this->isRetryableAiError($message)
+            || str_contains($message, 'server ai sedang padat')
+            || str_contains($message, 'request ke ai sedang terlalu banyak')
+            || str_contains($message, 'layanan ai sedang cooldown');
+    }
+
+    private function normalizeAiErrorMessage(string $message): string
+    {
+        $text = strtolower($message);
+        $retryAfterSeconds = $this->parseRetryAfterSeconds($message);
+
+        if (str_contains($text, 'high demand') || str_contains($text, 'try again later')) {
+            return $this->addRetryHint(
+                'Server AI sedang padat sementara. Coba lagi beberapa saat lagi.',
+                $retryAfterSeconds
+            );
+        }
+
+        if (str_contains($text, 'too many requests') || str_contains($text, 'resource exhausted') || str_contains($text, 'http 429')) {
+            return $this->addRetryHint(
+                'Request ke AI sedang terlalu banyak. Tunggu sebentar lalu coba lagi.',
+                $retryAfterSeconds
+            );
+        }
+
+        if (str_contains($text, 'cooldown')) {
+            return $this->addRetryHint(
+                'Layanan AI sedang cooldown sementara.',
+                $retryAfterSeconds
+            );
+        }
+
+        if (str_contains($text, 'timeout') || str_contains($text, 'terputus')) {
+            return 'Koneksi ke layanan AI timeout/terputus. Coba lagi sebentar.';
+        }
+
+        return $message;
+    }
+
+    private function addRetryHint(string $message, ?int $retryAfterSeconds): string
+    {
+        if ($retryAfterSeconds === null || $retryAfterSeconds <= 0) {
+            return $message;
+        }
+
+        return rtrim($message, '.') . " Coba lagi sekitar {$retryAfterSeconds} detik.";
+    }
+
+    private function parseRetryAfterSeconds(string $message): ?int
+    {
+        $patterns = [
+            '/retry in\s+([\d.]+)\s*s/i',
+            '/retry(?: after| sekitar)?\s+([\d.]+)\s*(?:detik|seconds?|secs?|s)\b/i',
+            '/"retryDelay":"([\d.]+)s"/i',
+            '/([\d.]+)\s*(?:detik|seconds?|secs?)\s+lagi/i',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $message, $matches) === 1 && isset($matches[1])) {
+                $seconds = (int) ceil((float) $matches[1]);
+                if ($seconds > 0) {
+                    return min($seconds, 600);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function shouldCacheModelCooldown(string $message): bool
+    {
+        $text = strtolower($message);
+
+        return str_contains($text, 'resource exhausted')
+            || str_contains($text, 'too many requests')
+            || str_contains($text, 'high demand')
+            || str_contains($text, 'temporarily unavailable')
+            || str_contains($text, 'overloaded')
+            || str_contains($text, 'http 429')
+            || str_contains($text, 'http 503')
+            || str_contains($text, 'retry in');
+    }
+
+    private function defaultCooldownSecondsForMessage(string $message): int
+    {
+        $text = strtolower($message);
+
+        if (str_contains($text, 'resource exhausted') || str_contains($text, 'too many requests') || str_contains($text, 'http 429')) {
+            return 30;
+        }
+
+        if (
+            str_contains($text, 'high demand')
+            || str_contains($text, 'temporarily unavailable')
+            || str_contains($text, 'overloaded')
+            || str_contains($text, 'http 503')
+        ) {
+            return 15;
+        }
+
+        return 12;
+    }
+
+    private function canRetryImmediately(string $message, ?int $retryAfterSeconds): bool
+    {
+        $text = strtolower($message);
+
+        if ($retryAfterSeconds !== null && $retryAfterSeconds > 0) {
+            return false;
+        }
+
+        return !str_contains($text, 'resource exhausted')
+            && !str_contains($text, 'too many requests')
+            && !str_contains($text, 'quota')
+            && !str_contains($text, 'http 429');
+    }
+
+    private function retryBackoffMicroseconds(int $attempt): int
+    {
+        $milliseconds = min(2200, 800 * $attempt);
+
+        return $milliseconds * 1000;
+    }
+
+    private function getModelCooldownSeconds(string $model): ?int
+    {
+        $cooldown = Cache::get($this->makeModelCooldownCacheKey($model));
+        if (!is_array($cooldown)) {
+            return null;
+        }
+
+        $until = (int) ($cooldown['until'] ?? 0);
+        $remaining = $until - time();
+
+        return $remaining > 0 ? $remaining : null;
+    }
+
+    private function setModelCooldown(string $model, int $seconds, string $message): void
+    {
+        $ttl = max(5, min($seconds, 600));
+
+        Cache::put($this->makeModelCooldownCacheKey($model), [
+            'until' => time() + $ttl,
+            'message' => $message,
+        ], now()->addSeconds($ttl + 5));
+    }
+
+    private function makeModelCooldownCacheKey(string $model): string
+    {
+        return self::MODEL_COOLDOWN_CACHE_PREFIX . sha1($model);
+    }
+
+    private function buildCooldownMessage(int $seconds): string
+    {
+        return "Layanan AI sedang cooldown sementara. Coba lagi sekitar {$seconds} detik.";
+    }
+
+    private function callGeminiHtml(
+        string $prompt,
+        string $apiKey,
+        string $model,
+        bool $ensureLandingStructure = false,
+        string $documentType = 'landing'
+    ): string
     {
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
         $full = '';
-        // Balance between quota usage and completeness for long prompts.
-        $maxTurns = max(1, min((int) env('GEMINI_MAX_TURNS', 4), 5));
+        // Keep request count efficient, but allow one continuation for longer HTML outputs.
+        $maxTurnsLimit = $documentType === 'company' ? 3 : 2;
+        $maxTurns = max(1, min((int) env('GEMINI_MAX_TURNS', $maxTurnsLimit), $maxTurnsLimit));
         $startedAt = microtime(true);
         $hardDeadlineSeconds = (float) env('GEMINI_HARD_DEADLINE_SECONDS', 150);
         $hardDeadlineSeconds = max(40, min($hardDeadlineSeconds, 540));
@@ -515,7 +1730,8 @@ HTML;
             $baseTurnTimeout = (int) env('GEMINI_TURN_TIMEOUT_SECONDS', 40);
             $baseTurnTimeout = max(12, min($baseTurnTimeout, 90));
             $timeoutSeconds = (int) max(12, min($baseTurnTimeout, floor($remaining - 4)));
-            $maxOutputTokens = (int) env('GEMINI_MAX_OUTPUT_TOKENS', 3600);
+            $defaultOutputTokens = $documentType === 'company' ? 4600 : 3000;
+            $maxOutputTokens = (int) env('GEMINI_MAX_OUTPUT_TOKENS', $defaultOutputTokens);
             $maxOutputTokens = max(1200, min($maxOutputTokens, 8192));
 
             try {
@@ -528,7 +1744,7 @@ HTML;
                     ->post($url . '?key=' . $apiKey, [
                         'contents' => $contents,
                         'generationConfig' => [
-                            'temperature' => 0.45,
+                            'temperature' => 0.35,
                             'maxOutputTokens' => $maxOutputTokens,
                         ],
                     ]);
@@ -552,13 +1768,16 @@ HTML;
             $chunk = $this->extractTextFromGeminiResponse($resp);
             $full .= $chunk;
 
-            if (str_contains($full, '<!-- END -->') || preg_match('/<\/html>/i', $full)) {
+            if (
+                str_contains($full, '<!-- END -->') ||
+                ($this->hasHtmlClosingTag($full) && $this->looksLikeCompleteHtml($full, $documentType))
+            ) {
                 break;
             }
 
             $contents[] = ['role' => 'model', 'parts' => [['text' => $chunk]]];
             $contents[] = ['role' => 'user', 'parts' => [[
-                'text' => 'Lanjutkan tepat dari posisi terakhir. Jangan ulangi konten sebelumnya. Prioritaskan menyelesaikan sisa HTML dan akhiri dengan <!-- END -->.'
+                'text' => $this->buildTurnContinuationInstruction($documentType)
             ]]];
         }
 
@@ -571,50 +1790,51 @@ HTML;
             ]);
         }
 
-        if (!$this->looksLikeCompleteHtml($full)) {
-            $continued = $this->continueIncompleteHtml($full, $apiKey, $model, $url);
-            if ($this->looksLikeCompleteHtml($continued)) {
+        if (!$this->looksLikeCompleteHtml($full, $documentType)) {
+            $continued = $this->continueIncompleteHtml($full, $apiKey, $model, $url, $documentType);
+            if ($this->looksLikeCompleteHtml($continued, $documentType)) {
                 return $continued;
             }
 
-            $repaired = $this->repairIncompleteHtml($full, $apiKey, $url);
-            if ($this->looksLikeCompleteHtml($repaired)) {
+            $repairSource = $continued !== '' ? $continued : $full;
+            $repaired = $this->repairIncompleteHtml($repairSource, $apiKey, $url, $documentType);
+            if ($this->looksLikeCompleteHtml($repaired, $documentType)) {
                 return $repaired;
             }
 
             $finalized = $this->finalizeHtmlBestEffort($repaired);
-            if ($this->looksLikeCompleteHtml($finalized)) {
+            if ($this->looksLikeCompleteHtml($finalized, $documentType)) {
                 return $finalized;
             }
 
             $wrapped = $this->forceHtmlWrapper($finalized !== '' ? $finalized : $repaired);
-            if ($this->looksLikeCompleteHtml($wrapped)) {
+            if ($this->looksLikeCompleteHtml($wrapped, $documentType)) {
                 return $wrapped;
             }
 
+            $salvaged = $this->salvageIncompleteHtmlDocument(
+                $wrapped !== '' ? $wrapped : $repairSource,
+                $ensureLandingStructure,
+                $documentType
+            );
+            if ($salvaged !== '') {
+                return $salvaged;
+            }
+
             throw ValidationException::withMessages([
-                'ai' => ['Output AI kepotong dan belum lengkap. Coba generate lagi 1x, atau ringkas input supaya hasil lebih cepat selesai.'],
+                'ai' => [$documentType === 'company'
+                    ? 'Output AI company profile belum selesai sepenuhnya. Coba generate lagi 1x, atau ringkas input supaya HTML bisa selesai lengkap.'
+                    : 'Output AI belum selesai sepenuhnya. Coba generate lagi 1x, atau ringkas input supaya HTML bisa selesai lengkap.'
+                ],
             ]);
         }
 
         return $full;
     }
 
-    private function repairIncompleteHtml(string $partialHtml, string $apiKey, string $url): string
+    private function repairIncompleteHtml(string $partialHtml, string $apiKey, string $url, string $documentType = 'landing'): string
     {
-        $repairPrompt = <<<PROMPT
-Lengkapi HTML berikut karena output sebelumnya terpotong.
-
-ATURAN:
-- Kembalikan HTML lengkap dari `<!doctype html>` sampai `</html>`.
-- Pertahankan struktur, style, dan isi yang sudah ada sebisa mungkin.
-- Hanya perbaiki bagian yang terpotong/kurang.
-- Output HARUS murni HTML, tanpa markdown.
-- Akhiri dengan `<!-- END -->`.
-
-HTML TERPOTONG:
-{$partialHtml}
-PROMPT;
+        $repairPrompt = $this->buildRepairPrompt($partialHtml, $documentType);
 
         try {
             /** @var Response $resp */
@@ -629,7 +1849,7 @@ PROMPT;
                     ],
                     'generationConfig' => [
                         'temperature' => 0.2,
-                        'maxOutputTokens' => 2800,
+                        'maxOutputTokens' => $documentType === 'company' ? 4600 : 3600,
                     ],
                 ]);
         } catch (ConnectionException $e) {
@@ -651,42 +1871,40 @@ PROMPT;
         return $fixed !== '' ? $fixed : $partialHtml;
     }
 
-    private function continueIncompleteHtml(string $partialHtml, string $apiKey, string $model, string $url): string
+    private function continueIncompleteHtml(
+        string $partialHtml,
+        string $apiKey,
+        string $model,
+        string $url,
+        string $documentType = 'landing'
+    ): string
     {
         $full = trim($partialHtml);
-        $maxTurns = 2;
+        $maxTurns = $documentType === 'company' ? 3 : 2;
 
         for ($i = 0; $i < $maxTurns; $i++) {
-            if ($this->looksLikeCompleteHtml($full)) {
+            if ($this->looksLikeCompleteHtml($full, $documentType)) {
                 return $full;
             }
 
-            $prompt = <<<PROMPT
-Lanjutkan HTML ini tepat dari karakter terakhir.
-- Jangan ulangi dari awal.
-- Hanya kirim sisa yang belum ada sampai penutup lengkap.
-- Akhiri dengan `</body></html><!-- END -->`.
-
-HTML SAAT INI:
-{$full}
-PROMPT;
+            $prompt = $this->buildContinuationPrompt($full, $documentType);
 
             try {
                 /** @var Response $resp */
                 $resp = Http::connectTimeout(15)
-                    ->timeout(30)
+                    ->timeout(24)
                     ->retry(0, 0)
                     ->acceptJson()
                     ->asJson()
                     ->post($url . '?key=' . $apiKey, [
                         'contents' => [
-                            ['role' => 'user', 'parts' => [['text' => $prompt]]],
-                        ],
-                        'generationConfig' => [
-                            'temperature' => 0.2,
-                            'maxOutputTokens' => 2000,
-                        ],
-                    ]);
+                        ['role' => 'user', 'parts' => [['text' => $prompt]]],
+                    ],
+                    'generationConfig' => [
+                        'temperature' => 0.2,
+                        'maxOutputTokens' => $documentType === 'company' ? 3600 : 2200,
+                    ],
+                ]);
             } catch (ConnectionException $e) {
                 return $full;
             }
@@ -777,210 +1995,459 @@ PROMPT;
         return $text;
     }
 
-    private function looksLikeCompleteHtml(string $html): bool
+    private function looksLikeCompleteHtml(string $html, string $documentType = 'landing'): bool
     {
-        $hasDoctype = preg_match('/<!doctype html>/i', $html) === 1;
-        $hasHtmlOpen = preg_match('/<html\b/i', $html) === 1;
-        $hasHtmlClose = preg_match('/<\/html>/i', $html) === 1;
-        $hasBodyOpen = preg_match('/<body\b/i', $html) === 1;
-        $hasBodyClose = preg_match('/<\/body>/i', $html) === 1;
+        $normalized = trim($html);
+        if ($normalized === '') {
+            return false;
+        }
 
-        return $hasDoctype && $hasHtmlOpen && $hasHtmlClose && $hasBodyOpen && $hasBodyClose;
+        $hasDoctype = preg_match('/<!doctype html>/i', $normalized) === 1;
+        $hasHtmlOpen = preg_match('/<html\b/i', $normalized) === 1;
+        $hasHtmlClose = $this->hasHtmlClosingTag($normalized);
+        $hasHeadOpen = preg_match('/<head\b/i', $normalized) === 1;
+        $hasHeadClose = preg_match('/<\/head>/i', $normalized) === 1;
+        $hasBodyOpen = preg_match('/<body\b/i', $normalized) === 1;
+        $hasBodyClose = preg_match('/<\/body>/i', $normalized) === 1;
+        $hasStyleOpen = preg_match('/<style\b/i', $normalized) === 1;
+        $hasStyleClose = preg_match('/<\/style>/i', $normalized) === 1;
+        $bodyContent = $this->extractBodyInnerHtml($normalized);
+
+        if (
+            !$hasDoctype ||
+            !$hasHtmlOpen ||
+            !$hasHtmlClose ||
+            !$hasHeadOpen ||
+            !$hasHeadClose ||
+            !$hasBodyOpen ||
+            !$hasBodyClose ||
+            !$hasStyleOpen ||
+            !$hasStyleClose
+        ) {
+            return false;
+        }
+
+        if ($this->containsBrokenCssBlock($normalized)) {
+            return false;
+        }
+
+        if ($bodyContent === null || !$this->meetsDocumentCompletenessThreshold($bodyContent, $documentType)) {
+            return false;
+        }
+
+        if ($this->containsPrematureClosingPattern($normalized)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private function hasHtmlClosingTag(string $html): bool
+    {
+        return preg_match('/<\/html>/i', $html) === 1;
+    }
+
+    private function extractBodyInnerHtml(string $html): ?string
+    {
+        if (preg_match('/<body\b[^>]*>([\s\S]*?)<\/body>/i', $html, $matches) !== 1) {
+            return null;
+        }
+
+        return $matches[1] ?? null;
+    }
+
+    private function containsBrokenCssBlock(string $html): bool
+    {
+        if (preg_match('/<style\b[^>]*>([\s\S]*?)<\/style>/i', $html, $matches) !== 1) {
+            return true;
+        }
+
+        $css = trim($matches[1] ?? '');
+        if ($css === '') {
+            return true;
+        }
+
+        $openBraces = substr_count($css, '{');
+        $closeBraces = substr_count($css, '}');
+
+        return $openBraces === 0 || $openBraces !== $closeBraces;
+    }
+
+    private function containsPrematureClosingPattern(string $html): bool
+    {
+        if (preg_match('/<style\b[^>]*>[\s\S]*<\/html>/i', $html) === 1 && preg_match('/<\/style>/i', $html) !== 1) {
+            return true;
+        }
+
+        if (preg_match('/<\/head>\s*<\/html>/i', $html) === 1) {
+            return true;
+        }
+
+        if (preg_match('/<\/style>\s*<\/head>\s*<\/html>/i', $html) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function salvageIncompleteHtmlDocument(string $html, bool $ensureLandingStructure, string $documentType = 'landing'): string
+    {
+        $body = $this->extractBestEffortBodyHtml($html);
+        $body = $this->stripLeadingNonHtmlNoise($body);
+
+        if (
+            $body === '' ||
+            $this->looksLikeCssFragment($body) ||
+            !$this->containsRenderableHtmlFragment($body) ||
+            !$this->meetsDocumentCompletenessThreshold($body, $documentType)
+        ) {
+            return '';
+        }
+
+        $title = 'Generated Page';
+        if (preg_match('/<title>(.*?)<\/title>/is', $html, $matches) === 1) {
+            $title = trim(strip_tags($matches[1])) ?: $title;
+        }
+
+        if ($ensureLandingStructure) {
+            $body = $this->ensureLandingStructure($body);
+        }
+
+        return <<<HTML
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{$this->e($title)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #111827;
+      background: #f8fafc;
+      line-height: 1.6;
+    }
+    img { max-width: 100%; height: auto; display: block; }
+    a { color: #1456D9; }
+  </style>
+</head>
+<body>
+{$body}
+</body>
+</html>
+HTML;
+    }
+
+    private function extractBestEffortBodyHtml(string $html): string
+    {
+        $content = trim($html);
+        if ($content === '') {
+            return '';
+        }
+
+        if (preg_match('/<body\b[^>]*>([\s\S]*)/i', $content, $matches) === 1) {
+            $content = $matches[1] ?? '';
+        }
+
+        $content = preg_replace('/<\/body>[\s\S]*$/i', '', $content) ?? $content;
+        $content = preg_replace('/<!doctype html>/i', '', $content) ?? $content;
+        $content = preg_replace('/<html\b[^>]*>/i', '', $content) ?? $content;
+        $content = preg_replace('/<\/html>/i', '', $content) ?? $content;
+        $content = preg_replace('/<head\b[\s\S]*?<\/head>/i', '', $content) ?? $content;
+        $content = preg_replace('/<style\b[\s\S]*?<\/style>/i', '', $content) ?? $content;
+        $content = preg_replace('/<style\b[\s\S]*$/i', '', $content) ?? $content;
+        $content = preg_replace('/<script\b[\s\S]*?<\/script>/i', '', $content) ?? $content;
+        $content = preg_replace('/<script\b[\s\S]*$/i', '', $content) ?? $content;
+        $content = trim($content);
+
+        return $content;
+    }
+
+    private function stripLeadingNonHtmlNoise(string $html): string
+    {
+        $content = trim($html);
+        if ($content === '') {
+            return '';
+        }
+
+        if (preg_match('/<(header|section|main|article|div|footer|form|h1|h2|h3|p|ul|ol|details|blockquote)\b/i', $content, $matches, PREG_OFFSET_CAPTURE) === 1) {
+            $offset = (int) ($matches[0][1] ?? 0);
+            if ($offset > 0) {
+                $content = ltrim(substr($content, $offset));
+            }
+        }
+
+        return trim($content);
+    }
+
+    private function containsRenderableHtmlFragment(string $html): bool
+    {
+        return preg_match('/<(header|section|main|article|div|footer|form|h1|h2|h3|p|ul|ol|li|details|summary|blockquote)\b/i', $html) === 1;
+    }
+
+    private function looksLikeCssFragment(string $html): bool
+    {
+        $content = trim($html);
+        if ($content === '') {
+            return false;
+        }
+
+        $htmlTagCount = preg_match_all('/<\/?[a-z][^>]*>/i', $content);
+        $selectorCount = preg_match_all('/(^|\n)\s*[.#]?[a-z0-9_-]+(?:\s+[.#]?[a-z0-9_-]+)*\s*\{/im', $content);
+        $braceCount = substr_count($content, '{') + substr_count($content, '}');
+        $colonCount = substr_count($content, ':');
+
+        return $htmlTagCount < 3 && (($selectorCount > 0 && $braceCount >= 2) || ($braceCount >= 4 && $colonCount >= 2));
+    }
+
+    private function isLandingPrompt(string $prompt): bool
+    {
+        $text = strtolower($prompt);
+
+        return str_contains($text, 'landing page')
+            || str_contains($text, 'sales')
+            || str_contains($text, 'cta')
+            || str_contains($text, 'problem')
+            || str_contains($text, 'faq');
+    }
+
+    private function ensureLandingStructure(string $body): string
+    {
+        $normalized = strtolower($body);
+        $requiredSections = [
+            'hero' => ['hero', 'headline', 'promo'],
+            'problem' => ['problem', 'masalah', 'pain'],
+            'benefit' => ['benefit', 'keunggulan', 'manfaat'],
+            'pricing' => ['harga', 'promo', 'penawaran'],
+            'testimoni' => ['testimoni', 'ulasan'],
+            'faq' => ['faq', 'pertanyaan'],
+            'form' => ['form', 'order', 'kontak', 'whatsapp'],
+            'footer' => ['footer'],
+        ];
+
+        foreach ($requiredSections as $key => $keywords) {
+            $exists = false;
+            foreach ($keywords as $keyword) {
+                if (str_contains($normalized, $keyword)) {
+                    $exists = true;
+                    break;
+                }
+            }
+            if (!$exists) {
+                $body .= "\n" . $this->buildLandingFallbackSection($key);
+            }
+        }
+
+        return $body;
+    }
+
+    private function buildLandingFallbackSection(string $section): string
+    {
+        switch ($section) {
+            case 'hero':
+                return '<section class="card"><h1>Penawaran Utama</h1><p>Ringkasan penawaran utama belum tersedia. Silakan lengkapi dan coba generate lagi.</p></section>';
+            case 'problem':
+                return '<section class="card"><h2>Masalah yang Diselesaikan</h2><p>Bagian ini akan menjelaskan masalah utama audiens dan solusinya.</p></section>';
+            case 'benefit':
+                return '<section class="card"><h2>Manfaat Utama</h2><ul><li>Manfaat utama 1</li><li>Manfaat utama 2</li><li>Manfaat utama 3</li></ul></section>';
+            case 'pricing':
+                return '<section class="card"><h2>Harga & Promo</h2><p>Detail promo akan muncul di sini.</p></section>';
+            case 'testimoni':
+                return '<section class="card"><h2>Testimoni</h2><p>Testimoni pelanggan akan tampil di sini.</p></section>';
+            case 'faq':
+                return '<section class="card"><h2>FAQ</h2><p>Pertanyaan umum akan tampil di sini.</p></section>';
+            case 'form':
+                return '<section class="card"><h2>Form Pemesanan</h2><form><label>Nama</label><input type="text" /><label>WhatsApp</label><input type="text" /><label>Kebutuhan</label><textarea></textarea><button type="button">Kirim</button></form></section>';
+            case 'footer':
+                return '<footer class="card"><p>&copy; 2026. All rights reserved.</p></footer>';
+            default:
+                return '';
+        }
     }
 
 
     private function buildPrompt(array $d): string
     {
-        $company = $d['company_name'];
-        $product = $d['product'];
-        $aud     = $d['audience'];
+        $company = $this->compactPromptText($d['company_name'], 80);
+        $product = $this->compactPromptText($d['product'], 120);
+        $aud     = $this->compactPromptText($d['audience'], 120);
         $tone    = $d['tone'];
-        $offer   = $d['main_offer'] ?? '';
-        $price   = $d['price_note'] ?? '';
-        $bonus   = $d['bonus'] ?? '';
-        $urgency = $d['urgency'] ?? '';
-        $cta     = $d['cta'];
-        $contact = $d['contact'] ?? '';
-        $color   = $d['brand_color'] ?? '';
+        $offer   = $this->compactPromptText($d['main_offer'] ?? '', 140);
+        $price   = $this->compactPromptText($d['price_note'] ?? '', 100);
+        $bonus   = $this->compactPromptText($d['bonus'] ?? '', 120);
+        $urgency = $this->compactPromptText($d['urgency'] ?? '', 110);
+        $cta     = $this->compactPromptText($d['cta'], 50);
+        $contact = $this->compactPromptText($d['contact'] ?? '', 120);
+        $color   = $this->compactPromptText($d['brand_color'] ?? '', 20);
 
         return <<<PROMPT
-Kamu adalah senior web developer + direct response copywriter. Buat 1 file landing page HTML yang rapi, modern, dan fokus konversi penjualan produk.
+Kamu adalah senior web developer + direct response copywriter. Buat 1 file landing page HTML yang sederhana, lengkap, stabil, boxed, dan fokus konversi.
 
-ATURAN OUTPUT:
-- Output HARUS HANYA HTML (mulai dari <!doctype html>), tanpa markdown, tanpa penjelasan.
-- Semua CSS ditulis di <style> (tidak boleh link CDN).
-- Layout WAJIB boxed seperti referensi: ada background luar abu-abu, lalu 1 kolom utama putih di tengah.
-- Lebar kolom utama desktop wajib dibatasi (gunakan max-width sekitar 760px-860px), center (`margin: 0 auto`), bukan full-width.
-- Di mobile tetap full lebar layar HP (padding secukupnya), tapi di tablet/desktop tetap kolom tengah.
-- Semua section konten harus berada di dalam kolom tengah tersebut.
-- Wajib pakai fondasi CSS yang rapi dan lengkap (tidak boleh setengah):
-  - CSS reset minimal: `*{box-sizing:border-box}` + reset margin default elemen utama.
-  - Definisikan variabel warna di `:root` (primary, accent, text, muted, bg, surface, border).
-  - Definisikan style global untuk `body`, `h1-h4`, `p`, `img`, `a`, `button`, `input`, `textarea`.
-  - Semua elemen form harus fully styled (jangan ada style default browser yang polos).
-  - Semua tombol CTA harus konsisten (radius, padding, warna, shadow, hover) dan center menggunakan wrapper (`.cta-wrap {text-align:center}`).
-  - WAJIB pastikan kontras tombol aman: warna teks tombol dan background tombol tidak boleh sama/terlalu mirip pada state normal, hover, dan focus.
-  - Definisikan token khusus tombol (`--btn-bg`, `--btn-text`, `--btn-hover-bg`, `--btn-hover-text`) lalu pakai konsisten di semua tombol.
-  - Form field harus tersusun vertikal rapi, label di atas input, jarak antar field konsisten.
-  - Card/testimoni/faq harus punya padding, border/radius, dan background yang konsisten.
-  - Gunakan layout grid/flex yang aman agar tidak overflow horizontal.
-- Aturan visual media:
-  - Untuk section fitur/benefit/card seperti referensi, JANGAN gunakan `<img>`.
-  - Gunakan icon saja (inline SVG atau karakter icon/emoji) di dalam elemen `.icon-badge` agar pasti tampil.
-  - Icon harus konsisten ukuran (mis. 28px-40px), center, dan punya background badge yang rapi.
-  - Jika perlu hero visual, tetap prioritaskan ilustrasi CSS/SVG inline, bukan gambar link eksternal.
-- Aturan FAQ WAJIB stabil:
-  - Gunakan struktur semantik `<details class="faq-item"><summary>...</summary><div class="faq-answer">...</div></details>`.
-  - `summary` wajib full-width, rapi, tanpa border aneh, cursor pointer, ikon +/- konsisten.
-  - Style state terbuka (`details[open]`) harus jelas; jawaban punya padding dan line-height nyaman.
-  - Tidak boleh ada teks/ikon FAQ yang keluar container di mobile.
-- Gaya visual dan ritme konten harus mirip landing page sales "scalev style": headline kuat, blok offer jelas, CTA berulang, trust section, dan struktur meyakinkan untuk closing.
-- JANGAN meniru brand/salin teks referensi mentah. Buat desain + copy orisinal namun nuansanya sekelas landing page referensi.
-- Gunakan pola copywriting khas referensi: ada label promo di atas hero, narasi masalah audiens, bagian "siapa yang cocok", bonus eksklusif, harga coret vs harga promo, lalu FAQ dan CTA penutup.
-- Wajib ada section ini:
-  1) Hero dengan label promo, headline penawaran, subheadline, CTA utama, mini trust badge
-  2) Problem -> Solution (pain points target audiens + solusi produk)
-  3) Siapa yang cocok untuk produk ini (minimal 3 persona)
-  4) Benefit list (minimal 4 poin)
-  5) Detail produk/program
-  6) Paket/harga + promo/urgency + bonus (jika data tersedia)
-  7) Testimoni sosial proof (minimal 3 testimoni realistis)
-  8) FAQ (minimal 5 pertanyaan)
-  9) Form lead/order bernuansa jualan (field: nama, no whatsapp, kebutuhan; tombol submit pakai CTA)
-  10) Footer berisi kontak dan disclaimer ringkas
-- Tampilkan CTA button dengan teks: "{$cta}".
-- Bahasa Indonesia, tone: {$tone}.
-- Jika ada contact, tampilkan di bagian footer.
-- Wajib responsive di desktop dan mobile.
-- Jangan buat navbar, top menu, atau hamburger menu.
-- Gunakan copy yang terasa menjual produk, bukan sekadar company profile.
-- Sisipkan elemen urgency yang natural (contoh kuota, periode promo, atau bonus terbatas) tanpa terkesan menakut-nakuti.
-- Hindari komponen yang melebar 100vw. Prioritaskan komposisi rapat dan fokus seperti sales letter column.
-- Checklist WAJIB sebelum menulis <!-- END -->:
-  1) Tidak ada elemen input/button/textarea yang tampil default browser.
-  2) Semua CTA button terlihat center secara visual.
-  3) Kontras warna tombol aman di semua state (normal/hover/focus) dan tetap terbaca.
-  4) Untuk fitur/benefit, hanya gunakan icon (tanpa `<img>`), dan icon tampil normal.
-  5) FAQ berfungsi dan tampil rapi (tertutup/terbuka) di mobile + desktop.
-  6) Tidak ada teks keluar container atau terpotong di mobile.
-  7) Struktur section lengkap dan jarak antar section konsisten.
-- WAJIB akhiri output dengan string persis: <!-- END -->
-- Jangan berhenti sebelum menulis <!-- END -->.
+PRIORITAS UTAMA:
+1. Dokumen HTML harus lengkap dan valid.
+2. Struktur harus berurutan dari atas ke bawah.
+3. Desain cukup rapi dan enak dibaca, tidak perlu terlalu rumit.
 
+ATURAN KERAS:
+- Output HARUS murni HTML lengkap dari `<!doctype html>` sampai `</html>`, tanpa markdown.
+- Baris awal HARUS dimulai dari `<!doctype html>`, lalu `<html lang="id">`, lalu `<head>`.
+- Jangan pernah mulai output dari `<section>`, `<div>`, `<footer>`, atau potongan body.
+- Semua CSS di dalam satu tag `<style>`.
+- Jangan gunakan `<script>`, `<svg>`, `<img>`, `<canvas>`, atau library eksternal.
+- Jangan gunakan navbar atau menu.
+- Layout satu kolom utama di tengah, max-width 820px.
+- Gunakan class sederhana dan konsisten: `page`, `card`, `hero`, `grid`, `btn`, `form-box`, `faq-item`.
+- FAQ wajib pakai `<details><summary>`.
+- Teks tombol CTA wajib persis: "{$cta}".
+- Jika contact tersedia, tampilkan di footer.
+- Akhiri output dengan `<!-- END -->`.
 
-DATA:
+BATASAN AGAR TIDAK KEPOTONG:
+- Buat HTML yang ringkas, jangan terlalu panjang.
+- Maksimal 1 paragraf pendek per section utama.
+- Benefit cukup 4 poin singkat.
+- Testimoni cukup 3 kartu singkat.
+- FAQ cukup 5 pertanyaan singkat.
+- Gunakan elemen visual sederhana berbasis CSS saja, tanpa icon SVG kompleks.
+
+URUTAN SECTION WAJIB:
+1. Hero
+2. Problem + solution
+3. Siapa yang cocok
+4. Benefit
+5. Detail produk/program
+6. Harga/promo/bonus/urgency
+7. Testimoni
+8. FAQ
+9. Form lead
+10. Footer
+
+STRUKTUR DASAR YANG HARUS DIIKUTI:
+`<!doctype html>`
+`<html lang="id">`
+`<head>`
+`<meta charset="UTF-8" />`
+`<meta name="viewport" content="width=device-width, initial-scale=1.0" />`
+`<title>...</title>`
+`<style>...</style>`
+`</head>`
+`<body>`
+`<main class="page"> ...semua section... </main>`
+`</body>`
+`</html>`
+
+GAYA COPY:
+- Bahasa Indonesia.
+- Tone {$tone}.
+- Menjual, jelas, padat, dan natural.
+- Jangan pakai lorem ipsum atau placeholder kosong.
+
+DATA BRAND:
 - Nama perusahaan: {$company}
 - Produk/jasa: {$product}
 - Target audiens: {$aud}
-- Penawaran utama (opsional): {$offer}
-- Harga/promo singkat (opsional): {$price}
-- Bonus (opsional): {$bonus}
-- Urgency/kelangkaan (opsional): {$urgency}
-- Warna brand (opsional): {$color}
-- Contact (opsional): {$contact}
-
-Buat konten yang masuk akal dan tidak ada placeholder seperti "lorem ipsum".
+- Penawaran utama: {$offer}
+- Harga/promo: {$price}
+- Bonus: {$bonus}
+- Urgency: {$urgency}
+- Warna brand: {$color}
+- Contact: {$contact}
 PROMPT;
     }
 
     private function buildCompanyProfilePrompt(array $d): string
     {
-        $company       = $d['company_name'];
-        $industry      = $d['industry'];
-        $tagline       = $d['tagline'] ?? '';
-        $overview      = $d['company_overview'];
-        $vision        = $d['vision'] ?? '';
-        $mission       = $d['mission'] ?? '';
-        $services      = $d['services'];
-        $target        = $d['target_market'] ?? '';
-        $uvp           = $d['unique_value'] ?? '';
-        $achievements  = $d['achievements'] ?? '';
-        $portfolio     = $d['portfolio'] ?? '';
-        $team          = $d['team_info'] ?? '';
-        $email         = $d['contact_email'] ?? '';
-        $phone         = $d['contact_phone'] ?? '';
-        $address       = $d['address'] ?? '';
-        $social        = $d['social_links'] ?? '';
-        $cta           = $d['cta'];
+        $company       = $this->compactPromptText($d['company_name'], 90);
+        $industry      = $this->compactPromptText($d['industry'], 100);
+        $tagline       = $this->compactPromptText($d['tagline'] ?? '', 120);
+        $overview      = $this->compactPromptText($d['company_overview'], 420);
+        $vision        = $this->compactPromptText($d['vision'] ?? '', 180);
+        $mission       = $this->compactPromptText($d['mission'] ?? '', 280);
+        $services      = $this->compactPromptText($d['services'], 420);
+        $target        = $this->compactPromptText($d['target_market'] ?? '', 180);
+        $uvp           = $this->compactPromptText($d['unique_value'] ?? '', 220);
+        $achievements  = $this->compactPromptText($d['achievements'] ?? '', 260);
+        $portfolio     = $this->compactPromptText($d['portfolio'] ?? '', 260);
+        $team          = $this->compactPromptText($d['team_info'] ?? '', 220);
+        $email         = $this->compactPromptText($d['contact_email'] ?? '', 120);
+        $phone         = $this->compactPromptText($d['contact_phone'] ?? '', 80);
+        $address       = $this->compactPromptText($d['address'] ?? '', 180);
+        $social        = $this->compactPromptText($d['social_links'] ?? '', 180);
+        $cta           = $this->compactPromptText($d['cta'], 60);
         $tone          = $d['tone'];
-        $brandColor    = $d['brand_color'] ?? '';
+        $brandColor    = $this->compactPromptText($d['brand_color'] ?? '', 20);
 
         return <<<PROMPT
-Kamu adalah senior web developer + brand copywriter. Buat 1 file HTML company profile yang profesional, modern, dan siap dipakai.
+Kamu adalah senior web developer + brand copywriter. Buat 1 file HTML company profile yang sederhana, lengkap, profesional, boxed, dan stabil untuk dipreview.
 
-ATURAN OUTPUT:
-- Output HARUS HANYA HTML lengkap (mulai dari <!doctype html>) tanpa markdown.
-- Semua CSS wajib inline di tag <style>, tanpa framework/CDN.
-- Layout harus clean, boxed, responsif mobile dan desktop.
-- WAJIB definisikan color token yang jelas dan dipakai konsisten:
-  `--bg`, `--surface`, `--text`, `--text-muted`, `--primary`, `--border`.
-- Kontras WAJIB aman:
-  - Teks utama jangan gunakan warna putih/abu sangat muda di background terang.
-  - Jika background section terang, teks harus gelap (`var(--text)`).
-  - Hindari overlay/gradient yang membuat teks sulit dibaca.
-  - CTA, heading, paragraph, dan link nav harus tetap terbaca jelas di desktop/mobile.
-- Wajib ada navbar dengan anchor link ke section utama.
-- Link navbar WAJIB dibatasi hanya 4 item ini saja (urutan boleh sama):
-  1) Home (`#home`)
-  2) Tentang (`#tentang`)
-  3) Layanan (`#layanan`)
-  4) Kontak (`#kontak`)
-- Jangan tampilkan link nav tambahan lain (seperti: Visi, Portfolio, Tim, dll) di navbar.
-- Navbar wajib responsif:
-  - Desktop/tablet tampil horizontal.
-  - Di desktop/tablet (>=769px): hamburger WAJIB tidak tampil sama sekali (`display:none`), hanya nav links horizontal yang tampil.
-  - Mobile (<=768px) wajib pakai hamburger menu yang bisa toggle buka/tutup.
-  - Di mobile (<=768px): nav links horizontal WAJIB disembunyikan default, hanya tombol hamburger yang tampil.
-  - Posisi hamburger WAJIB di pojok kanan header, sejajar vertikal dengan logo (header pakai flex `justify-content: space-between; align-items: center;`).
-  - Tombol hamburger jangan overlap logo/konten, punya ukuran tap target minimal 40x40px.
-  - Menu mobile harus rapi (tidak numpuk), mudah diklik, dan menutup otomatis setelah link diklik.
-  - Panel menu mobile tampil tepat di bawah header (bukan di tengah section), full width container, dengan background solid dan z-index aman.
-  - Transisi menu halus dan tidak bikin layout geser berlebihan.
-  - Hamburger HARUS benar-benar berfungsi pakai JavaScript vanilla (bukan CSS-only yang rawan gagal klik).
-  - Gunakan pola minimal:
-    - tombol: `id="menu-toggle"` + `aria-controls="mobile-menu"` + `aria-expanded`
-    - panel: `id="mobile-menu"`
-    - script `DOMContentLoaded` dengan `addEventListener('click', ...)` untuk toggle class open/close.
-  - Pastikan elemen header/menu tidak tertutup layer lain:
-    - header `position: sticky/fixed` dengan `z-index` tinggi.
-    - tombol dan panel menu `pointer-events: auto`.
-    - tidak ada pseudo-element/layer transparan menimpa area klik hamburger.
-- Wajib pakai media query eksplisit agar behavior tidak ambigu:
-  - `@media (min-width: 769px) { .menu-toggle { display: none !important; } .desktop-nav { display: flex !important; } .mobile-menu { display: none !important; } }`
-  - `@media (max-width: 768px) { .menu-toggle { display: inline-flex !important; } .desktop-nav { display: none !important; } }`
-- Wajib set `html { scroll-behavior: smooth; }` agar scroll antar section smooth.
-- Wajib ada section: Hero, Tentang Kami, Visi & Misi, Layanan, Keunggulan, Portfolio/Project, Tim, Pencapaian, CTA, Kontak + Footer.
-- Hindari gaya hard-selling seperti landing page promo. Fokus trust, kredibilitas, dan informasi perusahaan.
-- Gunakan icon sederhana (SVG inline) untuk card layanan/keunggulan, tidak pakai gambar eksternal.
-- Ukuran icon WAJIB dibatasi agar tidak oversize:
-  - Set wrapper icon tetap (contoh `.icon-wrap`) dengan `width`/`height` 56px-72px.
-  - Icon SVG di dalamnya wajib `width: 28px-36px; height: 28px-36px; max-width: 100%;`.
-  - Dilarang set icon dengan unit yang bisa membesar liar (`vw`, `clamp` terlalu besar, atau `%` tanpa batas).
-  - Pastikan icon tidak pernah lebih besar dari judul card pada semua breakpoint.
-- Form kontak sederhana wajib ada dengan field: Nama, Email, Pesan, dan tombol CTA bertuliskan "{$cta}".
-- Jika data optional kosong, isi dengan copy yang relevan dan natural (tanpa lorem ipsum).
-- Gunakan bahasa Indonesia dengan tone: {$tone}.
-- Jika tone = profesional atau formal: jangan gunakan emoji sama sekali di seluruh halaman, gunakan icon SVG yang clean.
-- Jika tone = santai: boleh gunakan icon playful secukupnya, tapi tetap profesional dan rapi.
-- Gunakan warna brand bila tersedia: {$brandColor}.
-- Pastikan aksesibilitas dasar: heading berurutan, kontras warna cukup, tombol dan input styled rapi.
-- Footer WAJIB pakai layout seperti company website modern:
-  - Background gelap (bukan putih), kontras teks jelas.
-  - Konten utama footer 3 kolom:
-    1) Kolom brand/nama perusahaan + deskripsi singkat
-    2) Kolom navigasi (hanya: Home, Tentang, Layanan, Kontak)
-    3) Kolom media sosial dengan icon bulat outline (SVG inline, tanpa emoji)
-  - Ada garis pemisah tipis lalu baris copyright di bagian paling bawah.
-  - Di mobile, 3 kolom footer stack vertikal rapi dengan jarak yang enak.
-  - Hindari footer polos; pastikan spacing, tipografi, dan alignment terlihat premium.
-- Akhiri output dengan string persis: <!-- END -->
-- SELF-CHECK sebelum tulis <!-- END -->:
-  1) Cek visual kontras: tidak ada teks yang nyaru dengan background.
-  2) Cek mobile 375px: tombol hamburger bisa diklik buka/tutup.
-  3) Setelah klik link di mobile menu, menu menutup otomatis.
-  4) Tidak ada elemen menutupi header/menu (z-index aman).
-  5) Cek desktop >=1024px: hamburger tidak muncul sama sekali.
-  6) Cek icon card: ukuran konsisten kecil-menengah, tidak ada icon oversize.
+PRIORITAS UTAMA:
+1. Dokumen HTML harus lengkap dan valid.
+2. Struktur halaman harus berurutan dari atas ke bawah.
+3. Utamakan website lengkap sampai footer, bukan dekorasi rumit.
+
+ATURAN KERAS:
+- Output HARUS murni HTML lengkap dari `<!doctype html>` sampai `</html>`, tanpa markdown.
+- Baris pertama HARUS `<!doctype html>`, lalu `<html lang="id">`, lalu `<head>`.
+- Jangan pernah mulai output dari `<section>`, `<div>`, `<footer>`, atau potongan body.
+- Semua CSS harus di dalam satu tag `<style>`.
+- Jangan gunakan `<script>`, `<svg>`, `<img>`, `<canvas>`, library eksternal, atau icon kompleks.
+- Tidak perlu hamburger menu. Jika ada navigasi, cukup link teks sederhana yang bisa wrap di mobile.
+- Gunakan layout boxed dengan satu kontainer utama, max-width sekitar 960px.
+- Gunakan token warna sederhana: `--bg`, `--surface`, `--text`, `--muted`, `--primary`, `--border`.
+- Kontras teks harus aman dan mudah dibaca.
+- Wajib ada form kontak dengan field: Nama, Email, Pesan, tombol "{$cta}".
+- Gunakan warna brand jika valid: {$brandColor}
+- Jika tone profesional atau formal, jangan pakai emoji.
+- Jika token mulai menipis, sederhanakan copy dan CSS, tapi JANGAN berhenti setelah header/nav.
+- Header cukup 4 link nav singkat.
+- Akhiri output dengan `<!-- END -->`.
+
+BATASAN AGAR OUTPUT STABIL:
+- HTML harus ringkas, jangan terlalu panjang.
+- Maksimal 1 paragraf pendek untuk tiap section utama.
+- Layanan cukup 3 sampai 4 item singkat.
+- Keunggulan cukup 3 item singkat.
+- Portfolio cukup 3 item singkat.
+- Pencapaian cukup 3 item singkat.
+- Tim cukup 3 kartu singkat.
+- Navigasi cukup sederhana.
+- Jika perlu menghemat token, pakai CSS yang singkat dan ulang class yang sama.
+
+URUTAN SECTION WAJIB:
+1. Header sederhana + navigasi teks
+2. Hero
+3. Tentang Kami
+4. Visi & Misi
+5. Layanan
+6. Keunggulan
+7. Portfolio / Project
+8. Tim
+9. Pencapaian
+10. CTA
+11. Kontak + Footer
+
+STRUKTUR DASAR YANG HARUS DIIKUTI:
+`<!doctype html>`
+`<html lang="id">`
+`<head>`
+`<meta charset="UTF-8" />`
+`<meta name="viewport" content="width=device-width, initial-scale=1.0" />`
+`<title>...</title>`
+`<style>...</style>`
+`</head>`
+`<body>`
+`<main class="page"> ...semua section... </main>`
+`</body>`
+`</html>`
+
+GAYA COPY:
+- Bahasa Indonesia.
+- Tone {$tone}.
+- Profesional, jelas, dan mudah dipercaya.
+- Jangan pakai lorem ipsum atau placeholder kosong.
 
 DATA PERUSAHAAN:
 - Nama perusahaan: {$company}
@@ -1000,7 +2467,127 @@ DATA PERUSAHAAN:
 - Alamat: {$address}
 - Sosial media/link: {$social}
 
-Buat hasil final yang siap pakai, tidak ada placeholder kosong, dan tetap ringkas dibaca pengunjung.
+Isi data optional yang kosong dengan copy profesional yang natural dan singkat.
 PROMPT;
+    }
+
+    private function buildTurnContinuationInstruction(string $documentType): string
+    {
+        if ($documentType === 'company') {
+            return 'Lanjutkan HTML company profile tepat dari posisi terakhir tanpa markdown. Jika draft sekarang baru header/nav atau sudah terlanjur menutup </body></html> sebelum semua section utama selesai, kirim ulang dokumen HTML lengkap dari <!doctype html> sampai </html>. Wajib selesaikan hero, tentang, visi misi, layanan, keunggulan, portfolio, tim, pencapaian, CTA, kontak, lalu akhiri dengan <!-- END -->.';
+        }
+
+        return 'Lanjutkan tepat dari posisi terakhir. Jangan ulangi konten sebelumnya. Prioritaskan menyelesaikan sisa HTML dan akhiri dengan <!-- END -->.';
+    }
+
+    private function buildRepairPrompt(string $partialHtml, string $documentType): string
+    {
+        if ($documentType === 'company') {
+            return <<<PROMPT
+Lengkapi HTML company profile berikut karena output sebelumnya terpotong atau berhenti terlalu cepat.
+
+ATURAN:
+- Jika draft sekarang baru header/nav atau belum punya section utama yang cukup, KIRIM ULANG dokumen HTML lengkap dari `<!doctype html>` sampai `</html>`.
+- Pertahankan brand, gaya, warna, dan copy yang masih bagus.
+- Selesaikan urutan section: Header, Hero, Tentang Kami, Visi & Misi, Layanan, Keunggulan, Portfolio, Tim, Pencapaian, CTA, Kontak, Footer.
+- Jika perlu menghemat token, sederhanakan CSS dan copy, tapi semua section wajib selesai.
+- Output HARUS murni HTML, tanpa markdown.
+- Akhiri dengan `<!-- END -->`.
+
+HTML TERPOTONG:
+{$partialHtml}
+PROMPT;
+        }
+
+        return <<<PROMPT
+Lengkapi HTML berikut karena output sebelumnya terpotong.
+
+ATURAN:
+- Kembalikan HTML lengkap dari `<!doctype html>` sampai `</html>`.
+- Pertahankan struktur, style, dan isi yang sudah ada sebisa mungkin.
+- Hanya perbaiki bagian yang terpotong/kurang.
+- Output HARUS murni HTML, tanpa markdown.
+- Akhiri dengan `<!-- END -->`.
+
+HTML TERPOTONG:
+{$partialHtml}
+PROMPT;
+    }
+
+    private function buildContinuationPrompt(string $partialHtml, string $documentType): string
+    {
+        if ($documentType === 'company') {
+            return <<<PROMPT
+Lanjutkan atau perbaiki HTML company profile ini.
+- Jika draft saat ini baru header/nav, terlalu pendek, atau sudah terlanjur menutup `</body></html>`, kirim ulang HTML LENGKAP dari awal mulai `<!doctype html>`.
+- Jika draft sudah cukup jauh, lanjutkan tepat dari bagian yang belum selesai tanpa mengulang isi yang sama.
+- Wajib selesaikan section: Hero, Tentang Kami, Visi & Misi, Layanan, Keunggulan, Portfolio, Tim, Pencapaian, CTA, Kontak, Footer.
+- Jangan kirim markdown.
+- Akhiri dengan `<!-- END -->`.
+
+HTML SAAT INI:
+{$partialHtml}
+PROMPT;
+        }
+
+        return <<<PROMPT
+Lanjutkan HTML ini tepat dari karakter terakhir.
+- Jangan ulangi dari awal.
+- Hanya kirim sisa yang belum ada sampai penutup lengkap.
+- Jika draft saat ini belum punya `<body>` atau isi halaman utama belum muncul, lengkapi seluruh bagian body yang hilang sampai tuntas.
+- Akhiri dengan `</body></html><!-- END -->`.
+
+HTML SAAT INI:
+{$partialHtml}
+PROMPT;
+    }
+
+    private function meetsDocumentCompletenessThreshold(string $bodyHtml, string $documentType): bool
+    {
+        $text = trim(preg_replace('/\s+/u', ' ', strip_tags($bodyHtml)) ?? '');
+        if ($text === '') {
+            return false;
+        }
+
+        $headingCount = preg_match_all('/<h[1-6]\b/i', $bodyHtml);
+        $sectionCount = preg_match_all('/<(header|section|footer|main|article)\b/i', $bodyHtml);
+
+        if ($documentType === 'company') {
+            if (mb_strlen($text) < 260) {
+                return false;
+            }
+
+            if ($headingCount < 5 || $sectionCount < 5) {
+                return false;
+            }
+
+            $keywordGroups = [
+                ['tentang', 'about'],
+                ['visi', 'vision'],
+                ['misi', 'mission'],
+                ['layanan', 'services', 'service'],
+                ['keunggulan', 'unggulan', 'value', 'why choose'],
+                ['portfolio', 'portofolio', 'project', 'proyek'],
+                ['tim', 'team'],
+                ['pencapaian', 'achievement', 'klien', 'client'],
+                ['kontak', 'contact', 'hubungi', 'email', 'telepon'],
+            ];
+
+            $matchedGroups = 0;
+            $normalizedText = strtolower($text);
+
+            foreach ($keywordGroups as $group) {
+                foreach ($group as $keyword) {
+                    if (str_contains($normalizedText, $keyword)) {
+                        $matchedGroups++;
+                        break;
+                    }
+                }
+            }
+
+            return $matchedGroups >= 5;
+        }
+
+        return mb_strlen($text) >= 120;
     }
 }
